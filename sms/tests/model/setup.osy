@@ -1,0 +1,11 @@
+// The desk's setup. In a file of its own with no `namespace`: an `app.X = …` value is resolved outside the file's
+// namespace, so the `using`s below are what let it name the desk's own classes.
+using Osysharp.Sms;
+using Osysharp.Conversations;
+using Osysharp.Conversations.Sms;
+using ConversationsSmsTests;
+
+app.Sms = new SmsSetup { Sender = new RecordingSmsSender(), From = "Desk" };
+app.Conversations = new ConversationsSetup {
+  Channels = [new SmsConversationChannel { Number = "+46766861004" }],
+};

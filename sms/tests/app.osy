@@ -1,0 +1,15 @@
+// The producer's test project for Osysharp.Conversations.Sms — a desk whose text sender RECORDS what it was handed, so
+// every test asserts what a carrier actually received, and what the conversation now holds. No test texts anybody.
+app ConversationsSmsTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Sms@0;
+  use Osysharp.Conversations@0;
+  use Osysharp.Collaboration@0;
+  // Osysharp.Conversations.Sms, the package under test, is not written: it arrives by itself because this app uses
+  // Conversations and Sms, which it completes (`osy lock` includes it and says so).
+  use Osysharp.Workflow;
+  use Osysharp.Ui;
+}
+

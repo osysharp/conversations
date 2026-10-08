@@ -1,0 +1,70 @@
+namespace Osysharp.Conversations.Sms;
+
+using Osysharp.Conversations;
+using Osysharp.Sms;
+
+/// Text messages as a conversation channel, from the app's own `Number` (E.164 — the number customers text).
+///
+///   app.Conversations = new ConversationsSetup { Channels = [new SmsConversationChannel { Number = "+46766861004" }] };
+public class SmsConversationChannel : IConversationChannel {
+  public string Key { get; } = "sms";
+  public ContactPointKind Reaches { get; } = ContactPointKind.Phone;
+  /// The number the desk texts from and customers text to — E.164.
+  public string Number = "";
+
+  /// Ready when the app's text sender is, and the channel has a NUMBER to be answered on.
+  public bool IsReady() {
+    var sender = App.Setting<SmsSetup>().Sender;
+    return NormalisedPhone(Number) != "" && sender != null && sender.IsReady();
+  }
+
+  /// What to fix: the number (a name cannot be answered), or the text sender.
+  public string NotReadyReason() {
+    if (NormalisedPhone(Number) == "") {
+      return Number.Trim() == ""
+        ? "The text-message channel has no number — set `Number` on SmsConversationChannel to the number customers text."
+        : $"'{Number}' cannot be answered — a conversation needs a phone NUMBER to text from, not a name. Set `Number` to one (`+46766861004`).";
+    }
+    var sender = App.Setting<SmsSetup>().Sender;
+    return sender == null
+      ? "No text-message sender is set up — name one in app.Sms (`Sender = new ElksSmsSender { … }`)."
+      : sender.NotReadyReason();
+  }
+
+  /// A text threads by the kit's window rule, not by an id of its own.
+  public bool ThreadsNatively() { return false; }
+
+  /// Ten concatenated parts — what carriers deliver as one message.
+  public int MaxLength() { return 1530; }
+
+  /// A person is being forgotten: the text outbox forgets what it sent them.
+  public void EraseCopiesTo(string to) { EraseSmsTo(to); }
+
+  /// Into the text outbox, from the channel's number; answers the outbox row's id — what a delivery report is matched by.
+  public string Send(OutboundMessage message, string idempotencyKey) {
+    var sent = SendSms(new SmsMessage { From = NormalisedPhone(Number), To = message.To, Text = message.Text }, idempotencyKey);
+    return sent.Id.ToString();
+  }
+}
+
+/// A text received — what the carrier's inbound webhook hands over: who sent it, to which of our numbers, the text and
+/// the carrier's id for it (the same id twice is the same text). Runs as the receiver's account, which the app's
+/// `IsConversationStaff` must admit.
+public InboundResult ReceiveSms(string from, string to, string text, string carrierId) {
+  var sender = NormalisedPhone(from);
+  if (sender == "") {
+    throw new ValidationException($"'{from}' is not a phone number — a text received must name its sender in E.164.");
+  }
+  return ReceiveInbound(new InboundMessage {
+    ChannelKey = "sms", Endpoint = NormalisedPhone(to) == "" ? to.Trim() : NormalisedPhone(to), From = sender,
+    ExternalId = carrierId, Text = text,
+  });
+}
+
+/// A carrier's delivery report for a text it was handed (`carrierId` is ITS id for it): delivered, or failed and why.
+/// Moves the conversation's delivery for that text, and nothing else.
+public void SmsDeliveryReport(string carrierId, bool delivered, string? problem = null) {
+  var outgoing = OutgoingSms.FirstOrDefault(m => m.ProviderId == carrierId);
+  if (outgoing == null) { return; }
+  DeliveryReport("sms", outgoing.Id.ToString(), delivered ? DeliveryOutcome.Delivered : DeliveryOutcome.Failed, problem);
+}

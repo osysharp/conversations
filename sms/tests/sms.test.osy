@@ -1,0 +1,130 @@
+// Osysharp.Conversations.Sms — text messages as a conversation channel. Every test asserts what the CARRIER was handed
+// (`Carried`, written by the desk's recording text sender) or what the conversation now holds.
+
+using Osysharp.Identity;
+using Osysharp.Sms;
+using Osysharp.Conversations;
+using Osysharp.Conversations.Sms;
+using ConversationsSmsTests;
+
+/// The desk: Ada answers; Hook is the account the carrier's webhook runs as.
+[TestFixture]
+void Desk() {
+  var ada = new Person { Email = "ada@desk.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  var hook = new Person { Email = "hook@desk.test", DisplayName = "Hook" };
+  new RoleGrant { Member = hook, Role = AppRole.Integration };
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@desk.test");
+principal Hook => Person.Single(p => p.Email == "hook@desk.test");
+
+/// Run everything queued: the conversation's deliveries, then the text outbox they wrote to.
+void DeliverAll() {
+  foreach (var d in MessageDelivery.ToList()) { Workflow.Settle(d); }
+  foreach (var m in OutgoingSms.ToList()) { Workflow.Settle(m); }
+}
+
+[Test(Desk)]
+void a_text_received_becomes_a_message_from_that_number() {
+  runas (Hook) {
+    var r = ReceiveSms("+46 70-111 22 33", "+46766861004", "Is my order on its way?", "in-1");
+    UnitOfWork.Commit();
+    Assert.True(r.Started);
+  }
+  runas (Ada) {
+    var c = Conversation.Single();
+    Assert.Equal("sms", c.ReplyChannel);
+    Assert.Equal("+46766861004", c.ReplyEndpoint);
+    Assert.Equal("Is my order on its way?", Message.Single().Text);
+    // The number, as every comparison spells it.
+    Assert.Equal(1, ContactPoint.Count(p => p.Kind == ContactPointKind.Phone && p.Value == "+46701112233"));
+  }
+}
+
+[Test(Desk)]
+void a_reply_is_texted_from_the_desks_number_and_its_report_moves_the_delivery() {
+  runas (Hook) { ReceiveSms("+46701112233", "+46766861004", "Is my order on its way?", "in-1"); UnitOfWork.Commit(); }
+  runas (Ada) {
+    Post(Conversation.Single(), "Yes — it arrives tomorrow.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  var carrierId = "";
+  runas (Ada) {
+    var sent = Carried.Single();
+    Assert.Equal("+46701112233", sent.To);
+    // From the NUMBER customers text — never the app's alphanumeric default (`app.Sms.From = "Desk"`).
+    Assert.Equal("+46766861004", sent.From);
+    Assert.Equal("Yes — it arrives tomorrow.", sent.Text);
+    Assert.Equal(DeliveryState.Sent, MessageDelivery.Single().State);
+    carrierId = sent.CarrierId;
+  }
+  runas (Hook) { SmsDeliveryReport(carrierId, true); UnitOfWork.Commit(); }
+  runas (Ada) { Assert.Equal(DeliveryOutcome.Delivered, MessageDelivery.Single().Outcome); }
+}
+
+[Test(Desk)]
+void a_text_within_the_window_continues_the_conversation_and_one_after_it_starts_a_new_one() {
+  runas (Hook) { ReceiveSms("+46701112233", "+46766861004", "First question.", "in-1"); UnitOfWork.Commit(); }
+  TestClock.Advance(TimeSpan.FromDays(2));
+  runas (Hook) {
+    var r = ReceiveSms("+46701112233", "+46766861004", "And another thing.", "in-2");
+    UnitOfWork.Commit();
+    Assert.True(!r.Started);
+  }
+  TestClock.Advance(TimeSpan.FromDays(8));
+  runas (Hook) {
+    var r = ReceiveSms("+46701112233", "+46766861004", "Weeks later — a new question.", "in-3");
+    UnitOfWork.Commit();
+    Assert.True(r.Started);
+  }
+  runas (Ada) { Assert.Equal(2, Conversation.Count()); }
+}
+
+[Test(Desk)]
+void the_same_text_delivered_twice_is_one_message() {
+  runas (Hook) {
+    ReceiveSms("+46701112233", "+46766861004", "Hello?", "in-1");
+    UnitOfWork.Commit();
+    Assert.True(ReceiveSms("+46701112233", "+46766861004", "Hello?", "in-1").Duplicate);
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal(1, Message.Count()); }
+}
+
+[Test(Desk)]
+void a_reply_too_long_for_a_text_is_refused_when_it_is_written() {
+  runas (Hook) { ReceiveSms("+46701112233", "+46766861004", "Tell me everything.", "in-1"); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var c = Conversation.Single();
+    var long = "";
+    while (long.Length < 1600) { long = long + "All the details. "; }
+    var e = Assert.Throws(() => { Post(c, long); });
+    Assert.Contains("one sms message carries at most 1530", e.Message);
+    Assert.Equal(0, MessageDelivery.Count());
+  }
+}
+
+[Test(Desk)]
+void a_channel_named_rather_than_numbered_is_not_ready_and_says_why() {
+  var channel = new SmsConversationChannel { Number = "Acme" };
+  Assert.True(!channel.IsReady());
+  Assert.Contains("cannot be answered", channel.NotReadyReason());
+  var none = new SmsConversationChannel();
+  Assert.Contains("has no number", none.NotReadyReason());
+}
+
+[Test(Desk)]
+void erasing_a_customer_erases_the_texts_the_desk_sent_them() {
+  runas (Hook) { ReceiveSms("+46701112233", "+46766861004", "Is my order on its way?", "in-1"); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(), "Yes — tomorrow."); UnitOfWork.Commit(); DeliverAll(); }
+  runas (Ada) {
+    Assert.Equal(1, OutgoingSms.Count(m => m.To == "+46701112233"));
+    // What a privacy request's erasure of their contact points asks of this channel (Osysharp.Privacy.Conversations).
+    new CopyErasure { Address = "+46701112233" };
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal(0, OutgoingSms.Count(m => m.To == "+46701112233")); }
+}
+

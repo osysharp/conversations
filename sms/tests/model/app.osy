@@ -1,0 +1,84 @@
+// A support desk that answers by text — the smallest correct consumer of Osysharp.Conversations.Sms.
+namespace ConversationsSmsTests;
+
+using Osysharp.Identity;
+using Osysharp.Sms;
+using Osysharp.Conversations;
+
+[Role] enum AppRole { Authenticator, Agent, Integration }
+
+/// The desk's staff: its agents, and the account the carrier's webhook runs as.
+policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && (g.Role == AppRole.Agent || g.Role == AppRole.Integration));
+// Who sits on a conversation (and any record) with the desk — the Collaboration kit's question.
+policy CollaboratesOnRecords => IsConversationStaff;
+
+entity Person : Principal {
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+  }
+}
+
+partial entity Osysharp.Conversations.Party { security { allow read, create, update when IsConversationStaff; } }
+partial entity ContactPoint { security { allow read, create, update when IsConversationStaff; } }
+partial entity Conversation { security { allow read, create, update when IsConversationStaff; } }
+partial entity Participant { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationEntry { security { allow read when IsConversationStaff; } }
+partial entity Message { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationEvent { security { allow read, create when IsConversationStaff; } }
+partial entity MessageText { security { allow read, create when IsConversationStaff; } }
+partial entity MessageDelivery { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationThreadKey { security { allow read, create when IsConversationStaff; } }
+partial entity PartyMerge { security { allow read, create when IsConversationStaff; } }
+partial entity ConversationSplit { security { allow read, create when IsConversationStaff; } }
+partial entity PartyErasure { security { allow read when IsConversationStaff; } }
+partial entity MessageAttachment { security { allow read, create when IsConversationStaff; } }
+// The desk's staff text customers — replies on conversations — and read what went out.
+partial entity OutgoingSms { security { allow create, read when IsConversationStaff; } }
+
+/// What the carrier was handed — one row per text.
+entity Carried {
+  [Required, MaxLength(20)] string To;
+  [MaxLength(20)] string From = "";
+  [Required, MaxLength(1600)] string Text;
+  [Required, MaxLength(120)] string CarrierId;
+  security { allow read, create when IsAuthenticated; }
+}
+
+/// A switch a test flips: the sender's credentials are missing.
+entity SenderState {
+  bool Unconfigured = false;
+  security { allow read, create when IsAuthenticated; }
+}
+
+/// A text sender that records instead of sending, and answers a carrier id of its own.
+public class RecordingSmsSender : ISmsSender {
+  public string Key { get; } = "recording";
+  public bool IsReady() { return !SenderState.Any(s => s.Unconfigured); }
+  public string SendSms(SmsMessage message, string idempotencyKey) {
+    var id = "elks-" + idempotencyKey;
+    new Carried { To = message.To, From = message.From, Text = message.Text, CarrierId = id };
+    return id;
+  }
+}
+
+// ── what an erasure run asks of a channel ─────────────────────────────────────────────────────────────────────────
+// A channel's `EraseCopiesTo` deletes what no person may — the outbox the kit keeps — so it is called only from a run:
+// in a real app, the Conversations kit's erasure run, when a privacy request's plan erases a person's contact points
+// (Osysharp.Privacy.Conversations). This desk has no privacy kit, so its tests ask the channel through a run of its own.
+
+enum CopyErasureState { Erased }
+
+/// One address whose copies the channel is asked to forget.
+entity CopyErasure {
+  [Required, MaxLength(255)] string Address;
+  CopyErasureState State;
+  security { allow read, create when IsConversationStaff; }
+}
+
+workflow CopyErasing {
+  Tracks    = CopyErasure.State;
+  Autostart = true;
+  Initial   = Erased;
+  state Erased { enter { ChannelReaching(ContactPointKind.Phone)!.EraseCopiesTo(this.Item.Address); } }
+}
