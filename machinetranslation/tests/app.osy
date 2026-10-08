@@ -1,0 +1,17 @@
+// The producer's test project for Osysharp.Conversations.MachineTranslation — a bicycle shop's web chat, answered in
+// English and read by each customer in their own language. No model is ever called: `LlmClient.Complete.Stub` answers
+// and records what it was asked.
+app ConversationsMachineTranslationTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Conversations@0;
+  use Osysharp.Collaboration@0;
+  use Osysharp.MachineTranslation@0;
+  // Osysharp.Conversations.MachineTranslation, the package under test, is not written: it arrives by itself because this app uses
+  // Conversations and MachineTranslation, which it completes (`osy lock` includes it and says so).
+  use Osysharp.Workflow;
+  use Osysharp.Memory;
+  use Osysharp.Ui;
+  use Osysharp.Storage;
+}

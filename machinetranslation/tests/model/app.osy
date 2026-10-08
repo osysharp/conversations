@@ -1,0 +1,39 @@
+// A bicycle shop's chat — the smallest correct consumer of Osysharp.Conversations.MachineTranslation.
+namespace ConversationsMachineTranslationTests;
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+
+[Role] enum AppRole { Authenticator, Agent }
+
+policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Agent);
+policy CollaboratesOnRecords => IsConversationStaff;
+
+entity Person : Principal {
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+  }
+}
+
+partial entity Osysharp.Conversations.Party { security { allow read, create, update when IsConversationStaff; } }
+partial entity ContactPoint { security { allow read, create, update when IsConversationStaff; } }
+partial entity Conversation { security { allow read, create, update when IsConversationStaff; } }
+partial entity Participant { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationEntry { security { allow read when IsConversationStaff; } }
+partial entity Message { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationEvent { security { allow read, create when IsConversationStaff; } }
+partial entity MessageText { security { allow read, create when IsConversationStaff; } }
+partial entity MessageLanguageWork { security { allow read, create when IsConversationStaff; } }
+partial entity MessageDelivery { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationThreadKey { security { allow read, create when IsConversationStaff; } }
+partial entity MessageAttachment { security { allow read, create when IsConversationStaff; } }
+partial entity PartyMerge { security { allow read, create when IsConversationStaff; } }
+partial entity ConversationSplit { security { allow read, create when IsConversationStaff; } }
+partial entity PartyErasure { security { allow read when IsConversationStaff; } }
+
+/// What the stubbed model was asked — so a test proves what was sent, and what never was.
+entity Asked {
+  [Required, MaxLength(8000)] string Prompt;
+  security { allow read, create when IsAnonymous || IsAuthenticated || IsAuthenticator; }
+}

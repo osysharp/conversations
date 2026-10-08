@@ -1,0 +1,32 @@
+namespace Osysharp.Conversations.MachineTranslation;
+
+using Osysharp.Conversations;
+using Osysharp.MachineTranslation;
+
+/// The conversations' translator, over the app's own model: detection offline first (the model only when a text is too
+/// short to tell), translation through `LlmClient.Complete`, the desk's glossary kept as written.
+public class ModelConversationTranslator : IConversationTranslator {
+  /// The translator underneath — which model, which key, which languages the detector knows.
+  public ModelTranslator Translator = new ModelTranslator();
+
+  /// Recorded as the `Engine` of every rendering it made.
+  public string Key { get; } = "model";
+
+  public bool IsReady() { return Translator.IsReady(); }
+
+  public string NotReadyReason() { return Translator.NotReadyReason(); }
+
+  public string Detect(string text) { return Translator.Detect(text); }
+
+  /// The offline detector's answer when it is sure — no model, no key, in the writer's own commit.
+  public string DetectLocally(string text) {
+    var guess = Translator.Detector.Guess(text);
+    return guess.Confident ? guess.Language : "";
+  }
+
+  public string Translate(string text, string from, string to, List<GlossaryTerm> glossary) {
+    List<TranslationTerm> terms = [];
+    foreach (var g in glossary) { terms.Add(new TranslationTerm { Term = g.Term, Rendering = g.Rendering }); }
+    return Translator.Translate(text, from, to, terms);
+  }
+}

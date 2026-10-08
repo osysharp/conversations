@@ -1,0 +1,71 @@
+// Osysharp.Conversations.MachineTranslation — a customer's message read by the desk in English and a reply read by the
+// customer in theirs, through the app's model. The model is a stub that TAGS (`[sv] …`) and records every prompt.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using Osysharp.Conversations.MachineTranslation;
+using Osysharp.MachineTranslation;
+using ConversationsMachineTranslationTests;
+
+/// Ada answers the chat; the model answers every translation by tagging it.
+[TestFixture]
+void Shop() {
+  var ada = new Person { Email = "ada@shop.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  LlmClient.Complete.Stub(p => {
+    new Asked { Prompt = p };
+    var start = p.IndexOf("<text>\n") + 7;
+    var end = p.IndexOf("\n</text>");
+    var to = p.Substring(p.IndexOf("into the language tagged ") + 25, 2);
+    return $"[{to}] " + p.Substring(start, end - start);
+  });
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@shop.test");
+
+[Test(Shop)]
+void a_swedish_message_is_read_in_english_and_a_reply_reaches_her_in_swedish() {
+  runas (new Visitor { Id = "visit-sv" }) {
+    StartConversation("Hej! Min cykel från Velora har en trasig växel och jag vill veta om den täcks av garantin.", "Växel");
+  }
+  Background.Settle();
+  runas (Ada) {
+    var hers = Message.Single();
+    Assert.Equal("sv", hers.Language);
+    Assert.Equal(TextSource.Machine, hers.CanonicalSource);
+    Assert.True(hers.CanonicalText!.StartsWith("[en] Hej! Min cykel från Velora"));
+    // Told offline — the one call was the translation, which kept the shop's name as written.
+    Assert.Equal(1, Asked.Count());
+    Assert.Contains("\"Velora\" stays \"Velora\"", Asked.Single().Prompt);
+    Post(hers.Conversation, "Yes — the gears are covered for two years. Bring it in any day.");
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    var rendering = MessageText.Single();
+    Assert.Equal("sv", rendering.Language);
+    Assert.Equal("[sv] Yes — the gears are covered for two years. Bring it in any day.", rendering.Text);
+    Assert.Equal("model", rendering.Engine);
+    Assert.True(rendering.WasDelivered);
+  }
+}
+
+[Test(Shop)]
+void an_english_message_costs_no_call() {
+  runas (new Visitor { Id = "visit-en" }) {
+    StartConversation("Hello, my gears are broken and I would like to know if the warranty covers them.", "Gears");
+  }
+  Background.Settle();
+  runas (Ada) {
+    Assert.Equal("en", Message.Single().Language);
+    Assert.Equal(TextSource.Original, Message.Single().CanonicalSource);
+    Assert.Equal(0, Asked.Count());
+  }
+}
+
+[Test(Shop)]
+void with_its_key_missing_it_is_not_ready_and_says_what_to_do() {
+  var t = new ModelConversationTranslator { Translator = new ModelTranslator { KeySecret = "ShopModel" } };
+  Assert.False(t.IsReady());
+  Assert.Equal("The model key is missing — give the secret ShopModel a value, and translation starts again.", t.NotReadyReason());
+}

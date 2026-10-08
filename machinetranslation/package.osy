@@ -1,0 +1,23 @@
+// Osysharp.Conversations.MachineTranslation — the app's own model as the translator of its conversations.
+//
+//     app.Conversations = new ConversationsSetup {
+//       Translator = new ModelConversationTranslator { Translator = new ModelTranslator { KeySecret = "Anthropic" } },
+//     };
+//
+// Every customer message gains a copy in the desk's language and every reply reaches each customer in theirs — with the
+// app's own key, through its own model, router and budget (Osysharp.MachineTranslation). Languages are told offline
+// first, so most messages cost one model call, not two.
+//
+// ⚑ A BRIDGE, NOT A PART OF EITHER KIT — Osysharp.MachineTranslation knows nothing of conversations, and conversations
+//   take any translator. With no key, the translator is not ready: messages keep their originals and the desk is told
+//   why, in words it can act on.
+package Osysharp.Conversations.MachineTranslation {
+  version     "0.2.0";
+  minPlatform "0.9.0";
+  summary     "the app's own model as the translator of its conversations — a copy of every customer message in the desk's language and every reply in each customer's, through the app's key, router and budget; a missing key a state the desk is told about, never a lost message.";
+  completes   Osysharp.Conversations@0, Osysharp.MachineTranslation@0;
+  model "model/*.osy";
+  use Osysharp.Conversations@0;
+  use Osysharp.MachineTranslation@0;
+  tests "tests";
+}

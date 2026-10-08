@@ -1,0 +1,12 @@
+// The shop's conversations: its own model translates (the app's default model — no key secret to wait for here), and
+// its glossary keeps its brand.
+using Osysharp.Conversations;
+using Osysharp.Conversations.MachineTranslation;
+using Osysharp.MachineTranslation;
+using ConversationsMachineTranslationTests;
+
+app.Conversations = new ConversationsSetup {
+  Translator = new ModelConversationTranslator(),
+  Glossary = [new GlossaryTerm { Term = "Velora" }],
+};
+
