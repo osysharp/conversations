@@ -1,0 +1,60 @@
+// Osysharp.Conversations — one conversation across channels: a customer's chat, their email, the portal and the team's
+// notes are ONE timeline, and who may see each entry is a rule, not a toggle in a composer.
+//
+// A `Conversation` is an ordered timeline of entries between parties. An entry is a `Message` (text on a channel, in a
+// direction) or a `ConversationEvent` (something that happened — an assignment, an SLA breach, an approved AI draft),
+// and every entry has a VISIBILITY: `Customer`, `Internal` or `AiInternal`. The kit's rules keep internal entries away
+// from everyone who is not staff, whatever the app grants and whichever way a row is reached — the composer's toggle is
+// a convenience, never the lock. Every entry takes the next place in ONE per-conversation sequence, so a message, a note
+// and an event written at once are in the order they happened.
+//
+// The people on the outside are `Party` rows — a base the app derives from (`Customer : Party` in a helpdesk, `Contact :
+// Party` in a CRM, or its own `Party : Osysharp.Conversations.Party`) — each reached through `ContactPoint` children (an
+// address, a number, a chat visitor), which are claims until a proof flow verifies them. Staff are the app's own
+// accounts; an AI agent is seated by name.
+//
+// ⚑ THE APP SAYS TWO THINGS, AND THE KIT NEVER KNOWS WHICH APP IT IS IN:
+//     policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Agent);   // who is staff
+//     partial entity Message { security { allow read, create when IsConversationStaff; } }            // what staff may do
+//   The kit grants the customer's side (their own conversations, customer-visible entries, writing as themselves) and
+//   its DENIES are the floor every grant — the app's included — stands on.
+//
+// WHAT ELSE IT DOES, each in a file of its own under model/:
+//   Channels.osy      the channel contract (`IConversationChannel`), the delivery outbox, receiving and threading
+//   Continuation.osy  a chat reply left unread is mailed (`WebFollowUp`), with a link that continues it anywhere, once
+//   Proofs.osy        "email me a code" — a claim becomes proof; account linking on sign-in
+//   Merges.osy        merging two parties that are one person, and undoing it; `PartyCard`
+//   Relations.osy     copying somebody in and taking them off; splitting a message off into a conversation of its own
+//   Sides.osy         side conversations: mail to somebody outside, or a thread inside the team, beside a conversation
+//   Language.osy      detection, a redacted canonical copy, renderings in each customer's language; scrubbing at rest
+//   Memory.osy        search and similar conversations over the canonical copies
+//   Erasure.osy       the copy register: erasure across every copy (run by `Osysharp.Privacy.Conversations` as a
+//                     request's plan and the daily purge decide), files erased only when marked about a person, export
+//
+// ⚑ NO TICKETS, NO STATUSES, NO QUEUES, NO SLA CLOCKS. Those are the helpdesk's and the Inbox kit's; they read
+//   `Conversation.LastCustomerEntryAt` and the timeline, and write their facts with `Record`. Nothing flows the other way.
+package Osysharp.Conversations {
+  version     "0.24.1";
+  minPlatform "0.9.0";
+  // A product capability: other kits meet it through a bridge that `completes` it, never by using it (D-COMPOSE1 §3.7).
+  role        vertical;
+  summary     "one conversation across channels — a single ordered timeline of messages, notes and events per conversation, visibility per entry enforced by rules (internal never reaches a customer), channels as adapters (email, SMS), a chat widget for a page or as a launcher in its corner with the app's own help above the first message, unread chat replies mailed (or sent on whichever channel reaches the kind of contact point the app names) with a single-use continue link, parties proven by a mailed code and merged or unmerged, people copied in and taken off by the desk, a message split off into a conversation of its own (it moves, with its files and its mail thread), side conversations started beside one — mail to somebody outside or a thread inside the team, drawn as a card on its timeline that opens into its own thread, the other side never seeing the conversation it is beside, each customer answered in their own language with every message scrubbed of card numbers at rest, a redacted canonical copy in the shared memory corpus, files on messages — a pasted screenshot shown in place, a source file previewed with its lines coloured, a ZIP listed, every file a download readable exactly where its message is — and an erasure run that reaches every copy, recorded and run only as a privacy request's plan or a conversation's period says (Osysharp.Privacy.Conversations).";
+  model "model/**/*.osy";
+  // The personal data its own fields hold (`[Classification(Personal.X)]`): an app maps a level onto its own
+  // classification, or leaves it to each row's own security.
+  personal Contact;
+  personal Content;
+  personal Identity;
+  use Osysharp.Identity@0;
+  // Who of the desk is on a conversation — the Collaboration kit's record presence, the one seat set every kit on a
+  // record shares (the Inbox's item seats included). The app says who collaborates (`CollaboratesOnRecords`).
+  use Osysharp.Collaboration@0;
+  use Osysharp.Workflow;
+  // Every message's canonical copy is in the app's shared corpus — what similar conversations and search read.
+  use Osysharp.Memory;
+  // The transcript, composer, presence chip and widget — themed by the app.
+  use Osysharp.Ui;
+  // Files on messages — screenshots, source files, a mail's attachments — are FileAssets, readable where their message is.
+  use Osysharp.Storage;
+  tests "tests";
+}

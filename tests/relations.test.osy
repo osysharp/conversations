@@ -1,0 +1,226 @@
+// Osysharp.Conversations 0.16.0 — WHO ELSE IS ON IT, AND WHAT BELONGS ELSEWHERE. The desk copies somebody in (they are
+// sent every reply, and read the conversation) and takes them off (both stop); and splits a message a customer wrote
+// off into a conversation of its own — the message MOVES, with its files and the thread key it arrived under, and opens
+// the new timeline. Every test asserts what was CARRIED, what a person can READ, or where a row now IS.
+//
+// The desk (Ada), Cus and Dee (customers with portal accounts) and `PartyOf` are in model.test.osy; `Mail` and
+// `DeliverAll` in channels.test.osy; `Png` in attachments.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using Osysharp.Storage;
+using ConversationsKitTests;
+
+/// What the timeline line `kind` on `c` says, to whoever is reading.
+string LineOn(Conversation c, string kind) {
+  return EventWords(ConversationEvent.Where(e => e.Conversation == c && e.Kind == kind).OrderByDescending(e => e.Sequence).First());
+}
+
+[Test(Desk)]
+void somebody_copied_in_is_sent_every_reply_until_they_are_taken_off() {
+  runas (Inbox) { Mail("ana@example.test", "<cc1@example.test>", "My invoice is wrong.", subject: "Invoice"); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Subject == "Invoice");
+    CopyInByAddress(c.Id, "Bo@Example.test", "Bo");
+    var copied = CopiedOn(c.Id);
+    Assert.Equal(1, copied.Count);
+    Assert.Equal("Bo", copied[0].Name);
+    Assert.Equal("bo@example.test", copied[0].Address);
+    Assert.Equal("Bo was copied in.", LineOn(c, "conversations.copied"));
+
+    Post(c, "We have corrected it.");
+    UnitOfWork.Commit();
+    DeliverAll();
+    Assert.Equal(1, Carried.Count(x => x.To == "bo@example.test"));
+    Assert.Equal(1, Carried.Count(x => x.To == "ana@example.test"));
+
+    UncopySeat(copied[0].Seat);
+    Assert.Equal(0, CopiedOn(c.Id).Count);
+    Assert.Equal("Bo is no longer copied in.", LineOn(c, "conversations.uncopied"));
+    Post(c, "And the credit note is on its way.");
+    UnitOfWork.Commit();
+    DeliverAll();
+    // Bo heard nothing more; Ana heard both.
+    Assert.Equal(1, Carried.Count(x => x.To == "bo@example.test"));
+    Assert.Equal(2, Carried.Count(x => x.To == "ana@example.test"));
+
+    // …and copying Bo again seats him again, the same seat.
+    CopyInByAddress(c.Id, "bo@example.test");
+    Assert.Equal(copied[0].Seat, CopiedOn(c.Id)[0].Seat);
+  }
+}
+
+[Test(Desk)]
+void copying_in_refuses_the_customer_somebody_already_on_it_and_a_bad_address() {
+  runas (Inbox) { Mail("ana@example.test", "<cc2@example.test>", "Where is my order?", subject: "Order"); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Subject == "Order");
+    Assert.Equal("ana@example.test is who this conversation is with — every reply goes to them already.",
+                 Assert.Throws<ValidationException>(() => CopyInByAddress(c.Id, "ana@example.test")).Message);
+    CopyInByAddress(c.Id, "bo@example.test", "Bo");
+    Assert.Equal("Bo is already copied in.", Assert.Throws<ValidationException>(() => CopyInByAddress(c.Id, "bo@example.test")).Message);
+    Assert.Equal("Give the address to copy in — like ana@example.com.",
+                 Assert.Throws<ValidationException>(() => CopyInByAddress(c.Id, "bo at example")).Message);
+    // The customer's own seat is never taken off this way.
+    var hers = Participant.Single(p => p.Conversation == c && p.Role == ParticipantRole.Customer);
+    Assert.Equal("Only somebody copied in can be taken off — not the person the conversation is with.",
+                 Assert.Throws<ValidationException>(() => UncopySeat(hers.Id)).Message);
+  }
+}
+
+/// Copying in is a READ grant to a person: Dee, copied, reads the conversation in her portal; taken off, she does not.
+[Test(Desk)]
+void a_person_copied_in_reads_the_conversation_and_stops_when_taken_off() {
+  Guid id = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Shared invoice");
+    Post(c, "Your invoice is attached.");
+    UnitOfWork.Commit();
+    id = c.Id;
+  }
+  runas (Dee) { Assert.Equal(0, Conversation.Count(x => x.Id == id)); }
+  runas (Ada) {
+    CopyIn(Conversation.Single(x => x.Id == id), PartyOf("dee@example.test"));
+    UnitOfWork.Commit();
+  }
+  runas (Dee) {
+    Assert.Equal(1, Conversation.Count(x => x.Id == id));
+    Assert.Equal(1, Message.Count(m => m.Conversation.Id == id));
+  }
+  runas (Ada) { UncopySeat(CopiedOn(id)[0].Seat); }
+  runas (Dee) {
+    Assert.Equal(0, Conversation.Count(x => x.Id == id));
+    Assert.Equal(0, Message.Count(m => m.Conversation.Id == id));
+  }
+}
+
+[Test(Desk)]
+void a_message_split_off_moves_with_its_files_and_opens_a_conversation_of_its_own() {
+  Guid oldId = Guid.Empty;
+  Guid fileId = Guid.Empty;
+  runas (Ada) { OpenConversation(PartyOf("cus@example.test"), "Billing"); UnitOfWork.Commit(); }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Billing");
+    Reply(c, "My invoice total is off by 10.");
+    var shot = File.Create("crash.png", "image/png", Png());
+    Reply(c, "Also — the app crashes when I export.", [shot]);
+    UnitOfWork.Commit();
+    oldId = c.Id;
+    fileId = shot.Id;
+  }
+  Guid newId = Guid.Empty;
+  runas (Ada) {
+    var old = Conversation.Single(x => x.Id == oldId);
+    Post(old, "Looking into the invoice.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+    var crash = Message.Single(m => m.Conversation.Id == oldId && m.Text.StartsWith("Also"));
+    var into = SplitOff(crash, "The app crashes on export");
+    UnitOfWork.Commit();
+    newId = into.Id;
+
+    // It MOVED: the new conversation holds it, first, and the old one does not.
+    var moved = Message.Single(m => m.Text.StartsWith("Also"));
+    Assert.Equal(newId, moved.Conversation.Id);
+    Assert.Equal(1, moved.Sequence);
+    Assert.Equal(0, Message.Count(m => m.Conversation.Id == oldId && m.Text.StartsWith("Also")));
+    var first = ConversationEntry.Where(e => e.Conversation.Id == newId).OrderBy(e => e.Sequence).First();
+    Assert.Equal(moved.Id, first.Id);
+    // Every place on the new timeline is its own.
+    var places = ConversationEntry.Where(e => e.Conversation.Id == newId).Select(e => e.Sequence).ToList();
+    Assert.Equal(places.Count, places.Distinct().Count());
+    // Its file went with it.
+    Assert.Equal(newId, MessageAttachment.Single(a => a.FileName == "crash.png").Message.Conversation.Id);
+
+    var fresh = Conversation.Single(x => x.Id == newId);
+    Assert.Equal("The app crashes on export", fresh.Subject);
+    Assert.Equal(oldId, fresh.SplitFrom!.Id);
+    Assert.Equal("Cus", Participant.Single(p => p.Conversation.Id == newId && p.Role == ParticipantRole.Customer).Party!.DisplayName);
+    // Both timelines say what happened.
+    Assert.Equal("A message from Cus was split off into a conversation of its own: “The app crashes on export”.",
+                 LineOn(Conversation.Single(x => x.Id == oldId), "conversations.split-out"));
+    Assert.Equal("Split off from “Billing”, with Cus's message.", LineOn(fresh, "conversations.split-in"));
+  }
+  // The customer reads the new conversation, their message and its file there — and the old one without it.
+  runas (Cus) {
+    Assert.Equal(1, Conversation.Count(x => x.Id == newId));
+    Assert.Equal(1, Message.Count(m => m.Conversation.Id == newId));
+    Assert.True(FileAsset.Any(f => f.Id == fileId));
+    Assert.Equal(1, Message.Count(m => m.Conversation.Id == oldId));
+  }
+  // Nobody else reads it.
+  runas (Dee) {
+    Assert.Equal(0, Conversation.Count(x => x.Id == newId));
+    Assert.False(FileAsset.Any(f => f.Id == fileId));
+  }
+}
+
+/// A split mail takes the thread key it arrived under: the customer's reply to THAT mail continues the new conversation.
+[Test(Desk)]
+void a_reply_to_a_split_mail_continues_the_conversation_it_was_split_into() {
+  runas (Inbox) {
+    Mail("ana@example.test", "<s1@example.test>", "Invoice is wrong.", subject: "Two things");
+    Mail("ana@example.test", "<s2@example.test>", "Separately: I cannot log in.", subject: "Re: Two things", answering: "<s1@example.test>");
+    UnitOfWork.Commit();
+  }
+  Guid intoId = Guid.Empty;
+  runas (Ada) {
+    var login = Message.Single(m => m.ExternalId == "<s2@example.test>");
+    var into = SplitOff(login, "Cannot log in");
+    UnitOfWork.Commit();
+    intoId = into.Id;
+    Assert.Equal("email", into.ReplyChannel);
+  }
+  runas (Inbox) {
+    Mail("ana@example.test", "<s3@example.test>", "Still cannot log in.", subject: "Re: Two things", answering: "<s2@example.test>");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    Assert.Equal(intoId, Message.Single(m => m.ExternalId == "<s3@example.test>").Conversation.Id);
+  }
+}
+
+/// SECURITY-INVARIANT(a-split-lands-only-where-its-writer-reads): a split record that names somebody else's
+/// conversation as where to move Cus's message is refused by the kit's run, and nothing moves.
+[Test(Desk)]
+void a_split_never_moves_a_message_where_another_customer_reads_it() {
+  runas (Ada) {
+    OpenConversation(PartyOf("cus@example.test"), "Cus asks");
+    OpenConversation(PartyOf("dee@example.test"), "Dee asks");
+    UnitOfWork.Commit();
+  }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Cus asks");
+    Reply(c, "First question.");
+    Reply(c, "My card number is in this one.");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    var mine = Conversation.Single(x => x.Subject == "Cus asks");
+    var hers = Conversation.Single(x => x.Subject == "Dee asks");
+    var secret = Message.Single(m => m.Text == "My card number is in this one.");
+    var split = new ConversationSplit { Message = secret, From = mine, Into = hers, At = DateTime.UtcNow, By = Session.CurrentUser };
+    UnitOfWork.Commit();
+    Assert.Equal(SplitState.Refused, ConversationSplit.Single(s => s.Id == split.Id).State);
+    Assert.Equal(mine.Id, Message.Single(m => m.Text == "My card number is in this one.").Conversation.Id);
+  }
+  runas (Dee) { Assert.Equal(0, Message.Count(m => m.Text == "My card number is in this one.")); }
+}
+
+[Test(Desk)]
+void only_something_a_customer_wrote_and_not_the_only_thing_is_split_off() {
+  runas (Ada) { OpenConversation(PartyOf("cus@example.test"), "One thing"); UnitOfWork.Commit(); }
+  runas (Cus) { Reply(Conversation.Single(x => x.Subject == "One thing"), "Just this."); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Subject == "One thing");
+    var only = Message.Single(m => m.Conversation == c);
+    Assert.Equal("That is the only thing the customer wrote here — there is nothing to split it from.",
+                 Assert.Throws<ValidationException>(() => SplitOff(only)).Message);
+    var note = Post(c, "Internal.", EntryVisibility.Internal);
+    var reply = Post(c, "Thanks!");
+    UnitOfWork.Commit();
+    Assert.Equal("Only a message a customer wrote can be split off into a conversation of its own.",
+                 Assert.Throws<ValidationException>(() => SplitOff(note)).Message);
+    Assert.Equal("Only a message a customer wrote can be split off into a conversation of its own.",
+                 Assert.Throws<ValidationException>(() => SplitOff(reply)).Message);
+  }
+}

@@ -1,0 +1,21 @@
+// The conversation components' own design token: the colour of what an AI wrote.
+//
+// Every other colour the components wear is the floor's (`Osysharp.Ui`): the one accent for what is live and yours, amber
+// for a note, slate-violet for waiting. An entry an AI wrote — a draft waiting for a person, a reply it sent itself, a
+// reply a person sent from its draft — is a different kind of thing on the timeline, and a reader should see that before
+// reading a word. So it has a colour of its own, used for a mark and a hairline, never for a fill a reader has to read
+// through: a violet that is neither the accent nor any status, light and dark contrast-checked as text on the surface
+// and on its own wash (Docs/OsySharp/design/ui-kit/contrast.py).
+//
+// An app re-themes it by declaring the same token in its own theme — `Colors { ConversationAi = Palette.From("#…"); }` —
+// or ties it to one of its own: `ConversationAi = Colors.Primary;`. Named `Conversation*` because a token name is shared
+// across the whole compiled app, so a bare `Ai` would collide with another kit's or the app's.
+
+namespace Osysharp.Conversations;
+
+theme Conversations {
+  Colors {
+    /// What an AI wrote: the mark on its entries, the hairline round its drafts, and (`.Subtle`) a draft's wash.
+    ConversationAi = Modes.Of(light: Palette.From("#7445B8"), dark: Palette.From("#B79BF2"));
+  }
+}

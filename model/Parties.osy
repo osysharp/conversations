@@ -1,0 +1,225 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+
+// ── who is staff — the app's to say ─────────────────────────────────────────────────────────────────────────────────
+
+/// Who works the conversations — the app's agents, leads, its integration account. The kit's rules use it to keep
+/// every internal note, event and draft away from everybody else; only the app knows who its people are, so the app
+/// DEFINES it (a missing definition is a compile error naming it):
+///   `policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && (g.Role == AppRole.Agent || g.Role == AppRole.Lead));`
+policy IsConversationStaff;
+
+/// WHO the customer side is — every customer grant in the kit names it in its `when`, so a rule for customers is never
+/// asked for the team: a signed-out visitor (the widget), a signed-in person who is not staff (the portal), and a member
+/// of staff who is a party of their own (a teammate who writes in as a customer, with their account on the party).
+/// ⚑ It must hold for every caller a customer grant's `where` admits, or naming it would take access away — and it
+/// does, with one deliberate exception: a member of staff whose only tie to a party is THIS browser's visit (they chatted
+/// in the widget, then signed in as staff). The kit already refuses that tie for the parties staff make
+/// (`CreatedByVisit` is set to null), because it would hand the agent's own browser a customer's conversations.
+policy IsConversationCustomer =>
+  IsAnonymous || IsAuthenticated && (!IsConversationStaff || Osysharp.Conversations.Party.Any(p => p.Account == user));
+
+// ── enums ⚠ appended, never inserted: an enum is stored by position ───────────────────────────────────────────────
+
+/// What kind of address a contact point is.
+public enum ContactPointKind {
+  [Label("Email")] Email,
+  [Label("Phone")] Phone,
+  /// A browser the platform issued a visitor id to — the widget's anonymous chatter.
+  [Label("Chat visitor")] Visitor,
+  /// A channel's own id for someone (a WhatsApp number's id, a Slack user id).
+  [Label("Handle")] Handle,
+}
+
+/// How a contact point was PROVEN — only proof flows write it, never an agent's say-so.
+public enum VerificationMethod {
+  [Label("Link")] Link,
+  [Label("Code")] Code,
+  [Label("Signed in")] SignIn,
+  /// Received from it on its channel — weak (a From header can be forged); threads and addresses, never verifies.
+  [Label("Received from")] InboundChannel,
+}
+
+// ── parties ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Someone outside the team who talks to it — by mail, phone or chat, usually with no account. The BASE an app derives
+/// from (`Customer : Party` in a helpdesk, `Contact : Party` in a CRM — or `Party : Osysharp.Conversations.Party`, the
+/// same short name, by namespace). Usable as-is: a minimal app never derives.
+///
+/// ⚑ THE APP STATES ITS STAFF'S ACCESS, so it is `Extensible`: this block grants what the kit can say truthfully — a
+///   customer reads their own party — and the app adds the rest (`allow read, create, update when IsConversationStaff`).
+///   An app's own subtype states its own grants (they are never inherited); the DENIES below reach it anyway.
+[Authority(Extensible)]
+public entity Party {
+  /// What staff see — a name, or the address it wrote from.
+  [Classification(Personal.Identity), MaxLength(200)] string DisplayName = "";
+  /// The language they write in and want answers in (BCP-47), once known.
+  [MaxLength(35)] string? Language;
+  /// Their signed-in account, when they have one — what opens the PORTAL to them. Written only by the sign-in flow,
+  /// on a verified address equal to a verified point (`account-link-needs-two-verified-addresses`), never by app code.
+  [Unique] Principal? Account;
+  /// The visit that made this party — the widget's bootstrap: a visitor may attach points only to a party it made.
+  /// Stamped with the request's visitor when the row is made (the default), and nobody may write another or change it.
+  /// ⚠ A party STAFF make (a call taken down, a mail received, an account's own party) sets it to null as it makes it:
+  ///   the default would stamp the agent's own browser, and that visit would then read the party's conversations as
+  ///   their customer.
+  /// The kit's own staff paths (`PartyReachedBy`, `LinkSignedInAccount`) do.
+  [MaxLength(64)] string? CreatedByVisit = Visitor.Id;
+  /// A party merged into another is kept, pointing at the survivor — late mail for it resolves there.
+  Party? MergedInto;
+  /// When its data was erased: the row stays so the conversations it took part in keep a (blank) author.
+  DateTime? ErasedAt;
+  [ForeignKey(Party)] ContactPoint[] Points;
+
+
+  security {
+    // A customer reads their own party: the account it is linked to, the visit that made it, a browser it was
+    // continued in — or the one a continue link names (`IsCustomerParty`).
+    allow read when IsConversationCustomer where IsCustomerParty(Id);
+    allow read when IsAuthenticator;
+    // A visit makes its own party (the widget's first message). The floor below keeps it to its own visit.
+    allow create when IsAnonymous || IsAuthenticated || IsAuthenticator;
+    allow update when IsAuthenticator;
+
+    // SECURITY-INVARIANT(account-link-needs-two-verified-addresses): `Account` is what grants the portal — every
+    // conversation of the party, through `IsCustomerIn`. Only the sign-in flow writes it (on a verified account address
+    // equal to a verified point); an agent, a customer, an app function: never. Guarded by tests/security.test.osy
+    // (nobody_but_the_sign_in_flow_links_a_party_to_an_account).
+    deny update Account when !IsAuthenticator;
+    deny create when !IsAuthenticator where Account != null;
+    // The widget bootstrap is the visit's own, never another's: a party made in this request names THIS visit, or none.
+    deny create when !IsAuthenticator && !IsConversationStaff where CreatedByVisit != Visitor.Id;
+    deny update CreatedByVisit;
+    deny update MergedInto when !IsConversationStaff;
+    deny update ErasedAt when !IsConversationStaff;
+  }
+}
+
+/// One way to reach a party — an address, a number, a chat visitor. Child rows, so a CRM person with five numbers and a
+/// helpdesk customer with one address are the same shape.
+[Unique(Party, Kind, Value)]
+[Authority(Extensible)]
+public entity ContactPoint {
+  [Required] Party Party;
+  [Required] ContactPointKind Kind;
+  /// Normalised: an address trimmed and lower-cased, a phone in E.164, a visitor the platform's `Visitor.Id`, a
+  /// handle as its channel gives it.
+  [Required, Classification(Personal.Contact), MaxLength(255)] string Value;
+  /// "Kind:Value" WHEN PROVEN, else null — unique, so many parties may CLAIM an address and only one can hold it
+  /// proven: the anchor resolution and account linking trust.
+  [Unique, Classification(Personal.Contact), MaxLength(300)] string? VerifiedKey;
+  DateTime? VerifiedAt;
+  VerificationMethod? VerifiedBy;
+  /// An agent's statement ("confirmed on the phone") — recorded and shown, deliberately NOT verification.
+  Principal? AssertedBy;
+  bool IsPreferred;
+  [MaxLength(60)] string? Label;
+
+  security {
+    // A customer reads the points of their own party.
+    allow read when IsConversationCustomer where IsParty(Party.Id);
+    allow read when IsAuthenticator;
+    // …and adds a CLAIM to it (an address typed in the widget) — never to anybody else's party.
+    allow create when IsConversationCustomer where IsParty(Party.Id);
+    allow create when IsAuthenticator;
+    // A continue link — mailed to the party's address, so held by whoever reads that mailbox — adds the browser that
+    // opens it to the party it was mailed for: a `Visitor` point, and only the browser's OWN (the floor below).
+    allow create by ConversationContinueLink
+      where Party == ConversationContinueLink.Row && Kind == ContactPointKind.Visitor;
+    allow update when IsAuthenticator;
+
+    // SECURITY-INVARIANT(visitor-point-is-the-visitors-own): a Visitor point is what lets a browser read a party's
+    // conversations, so one is made only with the CALLER's own proved visit id, and its value is nobody's to read.
+    // Guarded by tests/parties.test.osy (a_visitor_point_cannot_be_planted_for_another_visit, nobody_reads_a_visit_id).
+    deny create when !IsAuthenticator where Kind == ContactPointKind.Visitor && Value != Visitor.Id;
+    deny read Value when !IsAuthenticator where Kind == ContactPointKind.Visitor;
+    // SECURITY-INVARIANT(verification-is-proof-not-assertion): proof is written only by the proof flows (the sign-in
+    // flow's principal) — an agent's "confirmed on the phone" is `AssertedBy`, never `VerifiedKey`; account linking and
+    // automatic merges trust the latter. Guarded by tests/parties.test.osy (an_agent_cannot_mark_an_address_verified).
+    deny create when !IsAuthenticator where VerifiedKey != null || VerifiedAt != null || VerifiedBy != null;
+    deny update VerifiedKey when !IsAuthenticator;
+    deny update VerifiedAt when !IsAuthenticator;
+    deny update VerifiedBy when !IsAuthenticator;
+    deny update Value;
+    deny update Party;
+    deny update Kind;
+  }
+}
+
+// ── making and finding parties ──────────────────────────────────────────────────────────────────────────────────────
+
+/// How the app's parties are made, found and merged. Override to make the app's own kind:
+///   `public class DeskParties : PartyKinds { public override Party New(…) { return new Customer { … }; } }`
+///   `app.Conversations = new ConversationsSetup { Parties = new DeskParties() };`
+///
+/// ⚑ NONE OF THESE GRANTS ACCESS. Whoever `Resolve` answers is who a message is FILED under; whose history a browser
+///   may read is decided by the kit's rules alone (`IsParty`), which read proofs — never this class's answers.
+public class PartyKinds {
+  /// A new party, first reached by `kind`/`value` — override to make the app's own kind (`new Customer { … }`).
+  public virtual Party New(ContactPointKind kind, string value, string displayName) {
+    return new Party { DisplayName = displayName };
+  }
+  /// Who wrote from `value`? The party holding it PROVEN, else the newest party claiming it (a returning mailer), else
+  /// a new one (`New`) with it as a claim. A merged party answers as its survivor. Override for a CRM that matches on
+  /// more (its own identifiers, its dedupe rules) — and call `base.Resolve` for everything it does not decide.
+  public virtual Party Resolve(ContactPointKind kind, string value, string displayName) {
+    var known = PartyKnownBy(kind, value);
+    if (known != null) { return known; }
+    var made = New(kind, value, displayName);
+    made.CreatedByVisit = null;
+    new ContactPoint { Party = made, Kind = kind, Value = value };
+    return made;
+  }
+  /// Two parties are being merged — copy the app's own fields from `absorbed` to `kept` (a tier, notes). The kit moves
+  /// the contact points, the seats and the authorship itself, and keeps `absorbed` as a tombstone pointing at `kept`.
+  public virtual void Merge(Party kept, Party absorbed) { }
+  /// A person is being forgotten — blank the app's own fields on `party` (notes, a company, an address). The kit blanks
+  /// its own and deletes the contact points itself; the row stays, so conversations keep an author.
+  public virtual void Erase(Party party) { }
+}
+
+/// The party a signed-in account speaks as — the one the sign-in flow linked to it (`LinkSignedInAccount`), as it
+/// survives a merge — or null.
+public Party? AccountParty(Principal account) {
+  var linked = Party.FirstOrDefault(p => p.Account == account);
+  return linked == null ? null : Survivor(linked);
+}
+
+/// The caller's party: a signed-in customer's account's party, else the one their visit made (`VisitorParty`).
+public Party CallerParty(string displayName = "", string? language = null) {
+  var me = Session.CurrentUser;
+  if (me != null) {
+    var mine = AccountParty(me);
+    if (mine != null) { return mine; }
+  }
+  return VisitorParty(displayName, language);
+}
+
+/// The caller's own party in the widget: the one their visit made, one this browser was continued in, or a new one for
+/// it.
+[SuppressWarning("cost-unbounded-read")]   // signed out, a caller reads only its own parties — a handful at most
+public Party VisitorParty(string displayName = "", string? language = null) {
+  var visit = Visitor.Id;
+  var mine = Party.FirstOrDefault(p => p.CreatedByVisit == visit && p.MergedInto == null);
+  if (mine != null) { return mine; }
+  // A signed-in customer's own party (the portal's).
+  var me = Session.CurrentUser;
+  if (me != null) {
+    var linked = Party.FirstOrDefault(p => p.Account == me && p.MergedInto == null);
+    if (linked != null) { return linked; }
+  } else {
+    // A browser a continue link was opened in is that party's. Signed out, a caller reads only its own parties, so
+    // this is a handful of rows at most.
+    foreach (var p in Party.Where(p => p.MergedInto == null).ToList()) {
+      if (IsParty(p.Id)) { return p; }
+    }
+  }
+  // A signed-in caller with no party yet is named by their account — never by their visit's id.
+  var named = displayName.Trim() == "" && me != null ? me.DisplayName : displayName;
+  var made = App.Setting<ConversationsSetup>().Parties.New(ContactPointKind.Visitor, visit, named);
+  // The language their first message is in — what replies to them are rendered into.
+  if (made.Language == null && language != null) { made.Language = language; }
+  new ContactPoint { Party = made, Kind = ContactPointKind.Visitor, Value = visit };
+  return made;
+}

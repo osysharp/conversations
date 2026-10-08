@@ -1,0 +1,153 @@
+// Osysharp.Conversations — the model: one ordered timeline per conversation, whatever kind of entry; the app's own kind
+// of party; seats; read state. Every test asserts what a reader of the conversation would see.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+/// The desk: Ada works it; Cus is a customer with a portal account (her party is linked to it, as the sign-in flow
+/// would); Dee is another customer; Eve has an account and no party.
+[TestFixture]
+void Desk() {
+  var ada = new Person { Email = "ada@desk.test", DisplayName = "Ada", PasswordHash = Security.HashPassword("ada-desk-pass-1") };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  var cus = new Person { Email = "cus@example.test", DisplayName = "Cus" };
+  new ConversationsKitTests.Party { DisplayName = "Cus", Account = cus };
+  var dee = new Person { Email = "dee@example.test", DisplayName = "Dee" };
+  new ConversationsKitTests.Party { DisplayName = "Dee", Account = dee };
+  // Eve has an account and no party yet — what the sign-in flow would link one to.
+  new Person { Email = "eve@example.test", DisplayName = "Eve" };
+  // The account a mailbox's receiver runs as — staff by the desk's own policy.
+  var inbox = new Person { Email = "inbox@desk.test", DisplayName = "Inbox" };
+  new RoleGrant { Member = inbox, Role = AppRole.Integration };
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@desk.test");
+principal Cus => Person.Single(p => p.Email == "cus@example.test");
+principal Dee => Person.Single(p => p.Email == "dee@example.test");
+principal Inbox => Person.Single(p => p.Email == "inbox@desk.test");
+
+/// The party linked to a person's account.
+Osysharp.Conversations.Party PartyOf(string email) {
+  return Osysharp.Conversations.Party.Single(p => p.Account.Email == email);
+}
+
+[Test(Desk)]
+void every_entry_lands_in_one_order_whatever_its_kind() {
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Order 1001");
+    UnitOfWork.Commit();
+    Post(c, "Thanks — looking into it.");
+    UnitOfWork.Commit();
+    Record(c, "inbox.assigned", "Desk");
+    UnitOfWork.Commit();
+    Post(c, "Checked with the warehouse.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+  }
+  runas (Cus) { Reply(Conversation.Single(c => c.Subject == "Order 1001"), "Any news?"); }
+  runas (Ada) {
+    var kinds = ConversationEntry.Where(e => e.Conversation.Subject == "Order 1001").OrderBy(e => e.Sequence).ToList();
+    Assert.Equal(4, kinds.Count);
+    for (var i = 0; i < kinds.Count; i++) { Assert.Equal(i + 1, kinds[i].Sequence); }
+    Assert.True(kinds[0] is Message);
+    Assert.True(kinds[1] is ConversationEvent);
+    Assert.True(kinds[2] is Message);
+    var last = kinds[3] as Message;
+    Assert.Equal("Any news?", last!.Text);
+  }
+}
+
+[Test(Desk)]
+void a_message_and_an_event_written_at_once_get_consecutive_places() {
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "At once");
+    UnitOfWork.Commit();
+    Post(c, "Solved — a new one is on its way.");
+    Record(c, "desk.solved", "Desk", EntryVisibility.Customer);
+    Post(c, "Remember to refund shipping.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    var places = ConversationEntry.Where(e => e.Conversation.Subject == "At once").OrderBy(e => e.Sequence)
+      .Select(e => e.Sequence).ToList();
+    Assert.Equal(3, places.Count);
+    Assert.Equal(1, places[0]);
+    Assert.Equal(2, places[1]);
+    Assert.Equal(3, places[2]);
+  }
+}
+
+[Test(Desk)]
+void an_apps_own_kind_of_party_is_made_by_the_resolver_and_read_back_through_the_base() {
+  runas (new Visitor { Id = "visit-widget" }) { StartConversation("Is the shop open on Sunday?", "", "Eve"); }
+  runas (Ada) {
+    var started = Conversation.Single(c => c.StartedByVisit == "visit-widget");
+    var seat = Participant.Single(p => p.Conversation == started && p.Role == ParticipantRole.Customer);
+    // Read through the KIT's base, it is the desk's own kind — made by the desk's PartyKinds.New.
+    var party = seat.Party!;
+    Assert.True(party is ConversationsKitTests.Party);
+    Assert.Equal("Eve", party.DisplayName);
+    Assert.Equal("new", ConversationsKitTests.Party.Single(p => p.Id == party.Id).Tier);
+  }
+}
+
+[Test(Desk)]
+void a_participant_is_exactly_one_of_a_party_a_staff_account_or_an_ai() {
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Seats");
+    UnitOfWork.Commit();
+    SeatAi(c, "Triage");
+    UnitOfWork.Commit();
+    Assert.Equal(3, Participant.Count(p => p.Conversation == c));
+    // Two of the three at once is refused — a seat is one somebody.
+    Assert.Throws(() => {
+      new Participant { Conversation = c, Party = PartyOf("dee@example.test"), AgentName = "Triage", Role = ParticipantRole.Cc,
+                        JoinedAt = DateTime.UtcNow };
+      UnitOfWork.Commit();
+    });
+  }
+}
+
+[Test(Desk)]
+void unread_counts_only_customer_visible_entries_after_your_read_mark() {
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Unread");
+    UnitOfWork.Commit();
+    Post(c, "First reply.");
+    UnitOfWork.Commit();
+  }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Unread");
+    Assert.Equal(1, Unread(c));
+    MarkRead(c);
+    UnitOfWork.Commit();
+    Assert.Equal(0, Unread(c));
+  }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Subject == "Unread");
+    Post(c, "A note she never sees.", EntryVisibility.Internal);
+    Record(c, "inbox.assigned", "Desk");
+    Post(c, "Second reply.");
+    UnitOfWork.Commit();
+  }
+  // Three entries arrived; one was for her.
+  runas (Cus) { Assert.Equal(1, Unread(Conversation.Single(x => x.Subject == "Unread"))); }
+}
+
+[Test(Desk)]
+void your_own_message_is_never_unread_to_you() {
+  runas (Ada) {
+    OpenConversation(PartyOf("cus@example.test"), "Mine");
+    UnitOfWork.Commit();
+  }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Mine");
+    Reply(c, "Hello?");
+    UnitOfWork.Commit();
+    Reply(c, "Anyone there?");
+    UnitOfWork.Commit();
+    Assert.Equal(0, Unread(c));
+  }
+  // …while the desk has two unread from her.
+  runas (Ada) { Assert.Equal(2, Unread(Conversation.Single(x => x.Subject == "Mine"))); }
+}

@@ -1,0 +1,86 @@
+// What an AI wrote, on the timeline — marked in the kit's own `ConversationAi` colour, for the desk and for the customer.
+// A draft it left waits for a person; a reply it sent itself says so; a reply a person sent from its draft says who
+// checked it. `osy test --pixels` photographs each (Ui.Shot), wide and on a phone, light and dark.
+//
+// The desk (Ada) and Cus are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+/// Cus asks about a refund; the AI drafts an answer for Ada and answers a second question itself; Ada sends the draft,
+/// edited. Answers the conversation.
+Guid AnsweredWithAi() {
+  Guid id = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Refund for order 1001");
+    UnitOfWork.Commit();
+    id = c.Id;
+  }
+  runas (Cus) {
+    Reply(Conversation.Single(x => x.Id == id), "I sent the lamp back last week. When does the refund arrive?");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Id == id);
+    var draft = Post(c, "The refund for order 1001 is on its way and reaches your card within five working days.",
+                     EntryVisibility.AiInternal, "Shop assistant");
+    UnitOfWork.Commit();
+    ApproveDraft(draft, "Your refund for order 1001 left us today and reaches your card within five working days.");
+    UnitOfWork.Commit();
+    Post(c, "Our returns address is on every packing slip.", EntryVisibility.Customer, "Shop assistant");
+    Post(c, "Draft: offer free return shipping next time.", EntryVisibility.AiInternal, "Shop assistant");
+    UnitOfWork.Commit();
+  }
+  return id;
+}
+
+/// The desk reads every kind apart at a glance: the AI's drafts wear its colour and say they were not sent, a reply it
+/// sent itself says so, and the reply Ada sent from a draft says it was drafted by AI and sent by her.
+[Test(Desk)]
+void the_desk_sees_what_an_ai_wrote_in_its_own_colour() {
+  var id = AnsweredWithAi();
+  Ui.SignInAs(Ada);
+  Ui.Viewport(1280, 900);
+  Ui.Visit($"/desk/{id}/thread");
+  Assert.Visible("AI draft — not sent");
+  Assert.Visible("Draft: offer free return shipping next time.");
+  Assert.Visible("Sent by AI");
+  Assert.Visible("Drafted by AI, sent by Ada");
+  Ui.Shot("ai-entries-desk-wide-light");
+  Ui.Click("Switch theme");
+  Ui.Shot("ai-entries-desk-wide-dark");
+  Ui.Click("Switch theme");
+  Ui.Viewport(390, 844);
+  Assert.NoOverflow();
+  Ui.Shot("ai-entries-desk-phone-light");
+  // The chat-shaped transcript marks them the same way.
+  Ui.Viewport(1280, 900);
+  Ui.Visit($"/desk/{id}");
+  Assert.Visible("AI draft — not sent");
+  Assert.Visible("Drafted by AI, sent by Ada");
+  Ui.Shot("ai-entries-desk-transcript-wide-light");
+}
+
+/// The customer is told plainly: a reply the AI sent is from the "AI assistant", and the one Ada sent from its draft
+/// was written with AI and checked and sent by her. A draft never reaches their page.
+[Test(Desk)]
+void the_customer_is_told_plainly_what_an_ai_wrote() {
+  var id = AnsweredWithAi();
+  Ui.SignInAs(Cus);
+  Ui.Viewport(1280, 900);
+  Ui.Visit($"/my/{id}");
+  Assert.Visible("Our returns address is on every packing slip.");
+  Assert.Visible("AI assistant");
+  Assert.Visible("Your refund for order 1001 left us today and reaches your card within five working days.");
+  Assert.Visible("Written with AI, checked and sent by Ada");
+  Assert.Hidden("Draft: offer free return shipping next time.");
+  Assert.Hidden("AI draft — not sent");
+  Ui.Shot("ai-entries-customer-wide-light");
+  Ui.Click("Switch theme");
+  Ui.Shot("ai-entries-customer-wide-dark");
+  Ui.Click("Switch theme");
+  Ui.Viewport(390, 844);
+  Assert.NoOverflow();
+  Ui.Shot("ai-entries-customer-phone-light");
+}

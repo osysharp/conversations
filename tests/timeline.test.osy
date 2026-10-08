@@ -1,0 +1,83 @@
+// Osysharp.Conversations — a timeline's events keep their FACTS and are said when they are READ, in the reader's
+// language (D-RTL2 Q2): the same row reads in English to one reader and in Swedish to the next.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void an_event_is_said_from_its_facts_in_the_readers_language() {
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Said twice");
+    UnitOfWork.Commit();
+    var merged = Record(c, "conversations.parties-merged", "Osysharp.Conversations");
+    merged.Person = "Cus Old";
+    merged.OtherPerson = "Cus";
+    var one = Record(c, "conversations.party-erased", "Osysharp.Conversations");
+    one.Count = 1;
+    var three = Record(c, "conversations.party-erased", "Osysharp.Conversations");
+    three.Count = 3;
+    UnitOfWork.Commit();
+
+    // What is kept is the facts; the words come from them, in English for an English reader…
+    Assert.Equal("Cus Old was merged into Cus.", EventWords(merged));
+    Assert.Equal("A customer's words were erased on request. Messages blanked: 3. The timeline keeps its shape.",
+                 EventWords(three));
+    // …and in Swedish for a Swedish one, its count choosing the form — from the very same rows.
+    Session.SetLanguage("sv");
+    Assert.Equal("Cus Old slogs ihop med Cus.", EventWords(merged));
+    Assert.Equal("En kunds ord raderades på begäran. Ett meddelande tömdes. Tidslinjen behåller sin form.", EventWords(one));
+    Assert.Equal("En kunds ord raderades på begäran. 3 meddelanden tömdes. Tidslinjen behåller sin form.", EventWords(three));
+    // What a timeline fetches as it opens says the same, newest first.
+    var lines = ConversationEventLines(c.Id, 10);
+    Assert.Equal(3, lines.Count);
+    Assert.Equal("Cus Old slogs ihop med Cus.", lines[2].Sentence);
+    Session.SetLanguage("en");
+  }
+}
+
+[Test(Desk)]
+void a_kind_nobody_says_is_still_a_line_and_an_erased_one_says_so() {
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Unsaid");
+    UnitOfWork.Commit();
+    var unknown = Record(c, "desk.something-of-its-own", "Desk");
+    var merged = Record(c, "conversations.parties-merged", "Osysharp.Conversations");
+    merged.Person = "Cus Old";
+    // One whose conversation's words were erased (the kit's expiry sets it): it keeps its place and kind.
+    var gone = Record(c, "conversations.parties-merged", "Osysharp.Conversations");
+    gone.Person = "Cus Old";
+    gone.Erased = true;
+    UnitOfWork.Commit();
+    // An app that records a kind and never says it still gets a line — never a blank one.
+    Assert.Equal("Something happened.", EventWords(unknown));
+    // A merge whose second name is gone says "another customer" rather than a hole.
+    Assert.Equal("Cus Old was merged into another customer.", EventWords(merged));
+    // …and an erased one reads as erased, whatever facts are left on it.
+    Assert.Equal("Erased with the conversation's words.", EventWords(gone));
+  }
+}
+
+/// The line read a timeline makes is callable from a public page (the chat widget) — and answers only what its reader
+/// may read: a customer gets the lines they are told, never the desk's internal ones, whichever ids they ask about.
+[Test(Desk)]
+void a_timelines_lines_are_only_the_ones_its_reader_may_read() {
+  var id = Guid.Empty;
+  var note = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Told and not told");
+    UnitOfWork.Commit();
+    Record(c, "conversations.possibly-related", "Osysharp.Conversations", EntryVisibility.Customer);
+    note = Record(c, "conversations.auto-reply", "Osysharp.Conversations").Id;
+    UnitOfWork.Commit();
+    id = c.Id;
+    Assert.Equal(2, ConversationEventLines(id, 10).Count);
+  }
+  runas (Cus) {
+    var lines = ConversationEventLines(id, 10);
+    Assert.Equal(1, lines.Count);
+    Assert.Equal("This message quoted another conversation's thread, but its sender is not in it — started separately.",
+                 lines[0].Sentence);
+    Assert.Equal("", EventLineOf(note));
+  }
+}

@@ -1,0 +1,271 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+// ── merging two parties ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// The same person by mail, by phone and in the chat is three parties until something says they are one: staff, who
+// merge them by hand (`MergeParties`), or a proof (`ProvePoint`), which merges a visitor into the customer whose address
+// they proved. A merge MOVES the absorbed party's contact points, seats and authorship to the kept one and leaves the
+// absorbed party as a tombstone pointing at it (`MergedInto`) — so late mail for it lands on the survivor — and a
+// `PartyMerge` record lists every row it moved, which is what makes it undoable.
+//
+// ⚑ THE MOVES ARE THE WORKFLOW'S. A conversation's history is fixed for every caller (`deny update ByParty`), and a point
+//   never changes party by hand; a merge is the one thing that may move them, so it is a workflow — written as the
+//   system, after the record was accepted by its rules — and the record is the audit.
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum MergeState {
+  [Label("Merged")] Merged,
+  [Label("Undone")] Undone,
+  [Label("Refused")] Refused,
+}
+
+/// One merge of two parties — what moved, so it can be undone.
+[Authority(Extensible)]
+public entity PartyMerge {
+  /// The party that lives on.
+  [Required] Party Kept;
+  /// The party merged into it — kept as a tombstone pointing at `Kept`.
+  [Required] Party Absorbed;
+  /// Made by a proof (a code, a sign-in), not by a person.
+  bool Automatic;
+  [Classification(Personal.Content), MaxLength(300)] string Reason = "";
+  [Required] DateTime At;
+  /// The ids of the rows moved — contact points, seats, entries — and of the seats closed because `Kept` already sat
+  /// in that conversation. Comma-separated; the workflow's alone.
+  string MovedPoints = "";
+  string MovedSeats = "";
+  string ClosedSeats = "";
+  string MovedEntries = "";
+  /// Why it was refused.
+  [MaxLength(500)] string? Problem;
+  MergeState State;                                       // no default — PartyMerging owns it
+
+  security {
+    // A merge is the desk's: it moves a person's whole history.
+    deny read when !IsConversationStaff;
+    deny create when !IsConversationStaff;
+    deny create where MovedPoints != "" || MovedSeats != "" || ClosedSeats != "" || MovedEntries != "";
+    deny update;
+    deny delete;
+  }
+}
+
+/// Does each merge's moves once it is recorded, and undoes them on `Undo`.
+public workflow PartyMerging {
+  Tracks    = PartyMerge.State;
+  Autostart = true;
+  Initial   = Merged;
+
+  /// Put everything back. Raised by `UnmergeParties`, which only the desk can reach (it reads the merge to find it).
+  event Undo();
+
+  state Merged {
+    enter {
+      var m = this.Item;
+      var kept = m.Kept;
+      var absorbed = m.Absorbed;
+      // SECURITY-INVARIANT(merge-never-joins-two-accounts): two parties that each open a portal are two people's
+      // access; merging them would show each the other's conversations. Refused, whoever asked and whatever proof
+      // was offered. Guarded by tests/parties.test.osy (merging_two_signed_in_parties_is_refused).
+      if (kept.Account != null && absorbed.Account != null) {
+        m.Problem = "Both parties have an account — merging them would show each person the other's conversations.";
+        goto Refused;
+      }
+      if (kept.Id == absorbed.Id || kept.MergedInto != null || absorbed.MergedInto != null) {
+        m.Problem = "One of these parties is already merged into another — merge into the one it lives on as.";
+        goto Refused;
+      }
+      List<string> points = [];
+      foreach (var p in ContactPoint.Where(p => p.Party == absorbed).ToList()) {
+        // A point the kept party already has stays where it is — the tombstone resolves to the survivor anyway.
+        if (!ContactPoint.Any(q => q.Party == kept && q.Kind == p.Kind && q.Value == p.Value)) {
+          p.Party = kept;
+          points.Add(p.Id.ToString());
+        }
+      }
+      List<string> seats = [];
+      List<string> closed = [];
+      List<Conversation> touched = [];
+      foreach (var s in Participant.Where(s => s.Party == absorbed).ToList()) {
+        touched.Add(s.Conversation);
+        if (Participant.Any(o => o.Conversation == s.Conversation && o.Party == kept)) {
+          if (s.LeftAt == null) { s.LeftAt = DateTime.UtcNow; closed.Add(s.Id.ToString()); }
+        } else {
+          s.Party = kept;
+          seats.Add(s.Id.ToString());
+        }
+      }
+      List<string> entries = [];
+      foreach (var e in ConversationEntry.Where(e => e.ByParty == absorbed).ToList()) {
+        e.ByParty = kept;
+        entries.Add(e.Id.ToString());
+      }
+      m.MovedPoints = string.Join(",", points);
+      m.MovedSeats = string.Join(",", seats);
+      m.ClosedSeats = string.Join(",", closed);
+      m.MovedEntries = string.Join(",", entries);
+      // The app's own fields, then the tombstone.
+      App.Setting<ConversationsSetup>().Parties.Merge(kept, absorbed);
+      absorbed.MergedInto = kept;
+      foreach (var c in touched) {
+        var merged = Record(c, m.Automatic ? "conversations.parties-merged-by-proof" : "conversations.parties-merged",
+                            "Osysharp.Conversations");
+        Names(merged, absorbed, kept);
+        merged.Detail = m.Reason;
+      }
+    }
+    on Undo {
+      var m = this.Item;
+      var absorbed = m.Absorbed;
+      foreach (var id in IdsIn(m.MovedPoints)) {
+        var p = ContactPoint.FirstOrDefault(x => x.Id == id);
+        if (p != null) { p.Party = absorbed; }
+      }
+      foreach (var id in IdsIn(m.MovedSeats)) {
+        var s = Participant.FirstOrDefault(x => x.Id == id);
+        if (s != null) { s.Party = absorbed; }
+      }
+      foreach (var id in IdsIn(m.ClosedSeats)) {
+        var s = Participant.FirstOrDefault(x => x.Id == id);
+        if (s != null) { s.LeftAt = null; }
+      }
+      foreach (var id in IdsIn(m.MovedEntries)) {
+        var e = ConversationEntry.FirstOrDefault(x => x.Id == id);
+        if (e != null) { e.ByParty = absorbed; }
+      }
+      absorbed.MergedInto = null;
+      foreach (var s in Participant.Where(s => s.Party == absorbed).ToList()) {
+        Names(Record(s.Conversation, "conversations.parties-unmerged", "Osysharp.Conversations"), absorbed, m.Kept);
+      }
+      goto Undone;
+    }
+  }
+
+  terminal success Undone { }
+  terminal cancel Refused { }
+}
+
+/// The ids in a comma-separated list.
+List<Guid> IdsIn(string list) {
+  List<Guid> ids = [];
+  foreach (var s in list.Split(",")) { if (s.Trim() != "") { ids.Add(Guid.Parse(s.Trim())); } }
+  return ids;
+}
+
+/// What a party card calls a party.
+string NameOf(Party p) { return p.DisplayName == "" ? "A customer" : p.DisplayName; }
+
+/// A merge's line names both parties as they are called now, and which parties they are — so erasing who either one is
+/// reaches their name here too. A party with no name is said as "a customer" when it is read.
+void Names(ConversationEvent merged, Party person, Party other) {
+  merged.Person = person.DisplayName;
+  merged.PersonParty = person;
+  merged.OtherPerson = other.DisplayName;
+  merged.OtherParty = other;
+}
+
+// ── the desk's side ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Merge `absorbed` into `kept` — the same person, reached two ways. Answers the merge (its `State` says whether it was
+/// refused, and `Problem` why). Only the desk can write one.
+public PartyMerge MergeParties(Party kept, Party absorbed, string reason = "") {
+  var merge = new PartyMerge { Kept = Survivor(kept), Absorbed = Survivor(absorbed), Reason = reason, At = DateTime.UtcNow };
+  UnitOfWork.Commit();
+  return merge;
+}
+
+/// Undo a merge — every row it moved goes back, and the absorbed party stands on its own again. Only the desk reads a
+/// merge, so only the desk can name one here.
+public void UnmergeParties(Guid mergeId) {
+  var merge = PartyMerge.Single(m => m.Id == mergeId);
+  if (merge.State != MergeState.Merged) {
+    throw new ValidationException("Only a merge that went through can be undone.");
+  }
+  PartyMerging.RaiseUndo(merge);
+  UnitOfWork.Commit();
+}
+
+/// Parties that are probably this one — another party with one of its addresses, numbers or handles — for the desk to
+/// merge or leave. A suggestion only: nothing merges by itself without a proof.
+[SuppressWarning("cost-unbounded-read")]   // one party's contact points and the parties sharing them
+public List<Party> ProbablyTheSame(Party party) {
+  List<Party> found = [];
+  foreach (var point in ContactPoint.Where(p => p.Party == party && p.Kind != ContactPointKind.Visitor).ToList()) {
+    foreach (var other in ContactPoint.Where(p => p.Kind == point.Kind && p.Value == point.Value && p.Party != party
+                                                  && p.Party.MergedInto == null).ToList()) {
+      if (!found.Any(f => f.Id == other.Party.Id)) { found.Add(other.Party); }
+    }
+  }
+  return found;
+}
+
+// ── the party card's server side ───────────────────────────────────────────────────────────────────────────────────
+
+/// One contact point, as the card shows it.
+public class PartyCardPoint {
+  public string Kind = "";
+  public string Value = "";
+  /// "Proven by code", "Received from", "Confirmed by Ada (not proof)", "Claimed".
+  public string Standing = "";
+  public bool Proven;
+}
+
+/// Another party that is probably this one.
+public class PartyCardSuggestion {
+  public Guid Party;
+  public string Name = "";
+  public string Shares = "";
+}
+
+/// A merge this party took part in.
+public class PartyCardMerge {
+  public Guid Merge;
+  public string Sentence = "";
+  public bool CanUndo;
+}
+
+/// What `PartyCard` shows.
+public class PartyCardFacts {
+  public string Name = "";
+  public bool HasAccount;
+  public string MergedInto = "";
+  public List<PartyCardPoint> Points = [];
+  public List<PartyCardSuggestion> Suggestions = [];
+  public List<PartyCardMerge> Merges = [];
+}
+
+/// The desk's view of a party — its points and how far each is proven, who it is probably the same as, and its merges.
+[SuppressWarning("cost-unbounded-read")]   // one party's contact points, look-alikes and merges
+public PartyCardFacts PartyCardOf(Guid partyId) {
+  var party = Party.Single(p => p.Id == partyId);
+  var facts = new PartyCardFacts { Name = NameOf(party), HasAccount = party.Account != null,
+                                   MergedInto = party.MergedInto == null ? "" : NameOf(party.MergedInto!) };
+  foreach (var p in ContactPoint.Where(p => p.Party == party && p.Kind != ContactPointKind.Visitor).OrderBy(p => p.CreatedAt).ToList()) {
+    var standing = p.VerifiedKey != null ? $"Proven — {p.VerifiedBy}"
+      : p.AssertedBy != null ? "Confirmed by staff — not proof"
+      : "Claimed";
+    facts.Points.Add(new PartyCardPoint { Kind = $"{p.Kind}", Value = p.Value, Standing = standing, Proven = p.VerifiedKey != null });
+  }
+  foreach (var other in ProbablyTheSame(party)) {
+    var shared = ContactPoint.Where(p => p.Party == other && p.Kind != ContactPointKind.Visitor).Select(p => p.Value).ToList()
+      .Where(v => ContactPoint.Any(q => q.Party == party && q.Value == v)).ToList();
+    facts.Suggestions.Add(new PartyCardSuggestion { Party = other.Id, Name = NameOf(other), Shares = string.Join(", ", shared) });
+  }
+  foreach (var m in PartyMerge.Where(m => m.Kept == party || m.Absorbed == party).OrderByDescending(m => m.At).ToList()) {
+    var sentence = m.State == MergeState.Refused ? $"Merging {NameOf(m.Absorbed)} into {NameOf(m.Kept)} was refused: {m.Problem}"
+      : m.State == MergeState.Undone ? $"{NameOf(m.Absorbed)} was merged into {NameOf(m.Kept)}, then separated again"
+      : $"{NameOf(m.Absorbed)} merged into {NameOf(m.Kept)}" + (m.Automatic ? " — by proof" : "");
+    facts.Merges.Add(new PartyCardMerge { Merge = m.Id, Sentence = sentence, CanUndo = m.State == MergeState.Merged });
+  }
+  return facts;
+}
+
+/// The card's "Merge into this one" — `other` is merged into `partyId`'s party.
+public void MergeIntoParty(Guid partyId, Guid other) {
+  var merge = MergeParties(Party.Single(p => p.Id == partyId), Party.Single(p => p.Id == other));
+  if (merge.State == MergeState.Refused) { throw new ValidationException(merge.Problem ?? "That merge was refused."); }
+}
+

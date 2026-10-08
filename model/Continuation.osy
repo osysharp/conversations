@@ -1,0 +1,324 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+// ── continuing a conversation somewhere else ────────────────────────────────────────────────────────────────────────
+//
+// A customer asks in the chat and closes the tab. The desk answers ten minutes later — into a page nobody has open. So
+// a reply written in the chat that the customer has NOT READ after `ContinueByAfter` is mailed to them: every reply
+// they have not read, in one mail, with a link that continues the conversation in any browser. Their answer to that
+// mail lands in the SAME conversation (the mail's id is one of its thread keys), and from then on the desk's replies go
+// by mail — until the customer comes back to the chat.
+//
+// ⚑ ONE MAIL PER BATCH, NEVER ONE PER REPLY. The clock starts at the first reply they have not read and is not
+//   restarted by the next; what the mail carries is decided when it goes; a reply already mailed is never mailed again.
+//   A customer who reads in time gets nothing.
+//
+// ⚑ THE LINK IS SINGLE-USE. It is a `grant` — signed by the platform, good for three days — and the browser that opens
+//   it and says "continue here" becomes the party's (a `Visitor` point of ITS OWN visit, as every visitor point is).
+//   Every continue link to that seat is then taken back, so a forwarded mail opens nothing. Nothing happens on the page
+//   merely opening: a mail scanner that follows the link continues nobody.
+
+/// The link a follow-up mail carries: it makes whichever browser opens it the party it was mailed to — once — and that
+/// browser's chat opens on the conversation that moved last (the one the mail was about).
+public grant ConversationContinueLink for Party { Expires = TimeSpan.FromDays(3); }
+
+/// One reply a follow-up mail carries — who wrote it, when, and the text the customer is sent (their language's).
+public class FollowUpReply {
+  public string By = "";
+  public DateTime At;
+  public string Text = "";
+}
+
+/// The words the kit writes to customers. Override a method to change a sentence:
+///   `public class DeskCopy : ConversationCopy { public override string FollowUpIntro(int n) { return "…"; } }`
+///   `app.Conversations = new ConversationsSetup { Copy = new DeskCopy() };`
+public class ConversationCopy {
+  /// The first line of the follow-up mail.
+  public virtual string FollowUpIntro(int count) {
+    return count == 1 ? "You have a reply you have not read yet:" : $"You have {count} replies you have not read yet:";
+  }
+  /// The line before the continue link.
+  public virtual string FollowUpContinue() {
+    return "Answer this mail, or carry on in the chat:";
+  }
+  /// The whole follow-up text — each unread reply (in the customer's language) with who wrote it and when, then the
+  /// link.
+  public virtual string FollowUp(List<FollowUpReply> unread, string continueLink) {
+    var text = FollowUpIntro(unread.Count) + "\n";
+    foreach (var r in unread) {
+      text = text + "\n" + r.By + ", " + r.At.ToString("yyyy-MM-dd HH:mm") + " UTC\n" + r.Text + "\n";
+    }
+    return text + "\n" + FollowUpContinue() + "\n" + continueLink + "\n";
+  }
+  /// The subject of the mail that carries a code to prove an address.
+  public virtual string CodeSubject() { return "Your code"; }
+  /// …and its text.
+  public virtual string CodeText(string code) {
+    return $"Your code is {code}\n\nType it where you asked for it — it works for 15 minutes. If you did not ask for it, you can ignore this mail.";
+  }
+  /// A language's name, for a reader — "Swedish" for `sv`. The tag itself for one this list does not know.
+  public virtual string LanguageName(string tag) { return LanguageNameOf(tag); }
+  /// What the widget says under the first message when replies follow by mail.
+  public virtual string WidgetMailNotice() {
+    return "Leave your email and we will send our answer there if you have left by then.";
+  }
+  /// The chat widget's own words — its title, its first line, its fields and its button. Override any one to say it in
+  /// the app's own voice; each is said in the reader's language, as every kit text is.
+  public virtual string WidgetTitle() { return "Chat with us"; }
+  public virtual string WidgetIntro() { return "Ask us anything — we read every message."; }
+  public virtual string WidgetNameLabel() { return "Your name"; }
+  public virtual string WidgetEmailLabel() { return "Your email"; }
+  /// The placeholder of a field nobody has to fill in.
+  public virtual string WidgetOptional() { return "Optional"; }
+  public virtual string WidgetMessageLabel() { return "Your message"; }
+  public virtual string WidgetAttach() { return "Attach files"; }
+  public virtual string WidgetStart() { return "Start the conversation"; }
+  /// Said when the button is pressed with nothing written.
+  public virtual string WidgetWriteFirst() { return "Write a message first."; }
+  /// The launcher's name for screen readers, and its button's.
+  public virtual string LauncherLabel() { return "Chat with us"; }
+  public virtual string LauncherClose() { return "Close the chat"; }
+  /// What `happened` says on a timeline — said NOW, in the reader's language, from the facts it holds (D-RTL2 Q2). The
+  /// kit says its own kinds ("conversations.…"); an app overrides this for the kinds it records, and hands every other
+  /// kind back here:
+  ///   `public override string EventSentence(ConversationEvent e) {`
+  ///   `  if (e is TicketEvent t && t.Kind == "helpdesk.status") { return $"Status set to {t.Name}."; }`
+  ///   `  return base.EventSentence(e);`
+  ///   `}`
+  /// A kind nobody says is still a line on the timeline — "Something happened." — never a blank one.
+  public virtual string EventSentence(ConversationEvent happened) {
+    var k = happened.Kind;
+    var who = happened.Person != "" ? happened.Person : "A customer";
+    var whom = happened.OtherPerson != "" ? happened.OtherPerson : "another customer";
+    var why = happened.Detail;
+    if (k == "conversations.parties-merged") {
+      return why == "" ? $"{who} was merged into {whom}." : $"{who} was merged into {whom}: {why}";
+    }
+    if (k == "conversations.parties-merged-by-proof") {
+      return $"{who} was merged into {whom} — they proved an address of theirs, so they are the same person.";
+    }
+    if (k == "conversations.parties-unmerged") { return $"{who} was separated from {whom} again."; }
+    if (k == "conversations.party-erased") {
+      var blanked = happened.Count ?? 0;
+      return $"A customer's words were erased on request. Messages blanked: {blanked}. The timeline keeps its shape.";
+    }
+    if (k == "conversations.retention-erased") {
+      return happened.Cause == ErasureCause.ClaimsPeriodEnded ? "Erased: it was kept for legal claims, and that period ended."
+                                                               : "Erased: its period ended.";
+    }
+    if (k == "conversations.auto-reply") {
+      return happened.Person == "" ? "An automatic reply was received and not answered."
+                                   : $"An automatic reply from {happened.Person} was received and not answered.";
+    }
+    if (k == "conversations.copied") { return $"{who} was copied in."; }
+    if (k == "conversations.uncopied") { return $"{who} is no longer copied in."; }
+    if (k == "conversations.split-out") {
+      return why == "" ? $"A message from {who} was split off into a conversation of its own."
+                       : $"A message from {who} was split off into a conversation of its own: “{why}”.";
+    }
+    if (k == "conversations.split-in") {
+      return why == "" ? $"Split off from another conversation, with {who}'s message."
+                       : $"Split off from “{why}”, with {who}'s message.";
+    }
+    if (k == "conversations.side-started") {
+      return happened.Person == "" ? $"A thread inside the team was started beside this: “{why}”."
+                                   : $"A side conversation with {happened.Person} was started: “{why}”.";
+    }
+    if (k == "conversations.side-replied") { return $"{who} answered in the side conversation “{why}”."; }
+    if (k == "conversations.possibly-related") {
+      return "This message quoted another conversation's thread, but its sender is not in it — started separately.";
+    }
+    return "Something happened.";
+  }
+}
+
+/// Where a seat's reply-by-mail clock stands. `None` until a reply in the chat goes unread; `Pending` while the clock
+/// runs; `Sent` once the follow-up has gone — and a new unread reply starts it again.
+///
+/// ⚑ STARTED BY THE FIRST REPLY THAT WAITS ON THE SEAT, NOT WITH THE SEAT (`FollowUpLater`). A run per seat from the moment
+///   it was made cost every conversation a run for each staff member, AI agent and customer in it (8 statements each, two
+///   or three a new ticket — SP-73), and only a customer or a copied person answered in the chat ever needs one. Started,
+///   it begins `Pending`: exactly where `Replied` took a run that had been waiting in `None`.
+public workflow WebFollowUp {
+  Tracks    = Participant.FollowUp;
+  Autostart = false;
+  Initial   = Pending;
+
+  /// A reply was written in the chat that this seat may not have seen. Raised by the kit's `Post` — code, never a
+  /// browser — and harmless however often: the clock decides what to mail from what is UNREAD when it fires, so a
+  /// spurious raise mails nothing new. (Not gated on `IsConversationStaff`: a package's supplied policy is bound in the
+  /// app's pass and cannot be read in a package workflow's `[Authorize]` — friction F-CONV3.)
+  event Replied();
+
+  state None {
+    on Replied { goto Pending; }
+  }
+
+  state Pending {
+    // From the FIRST unread reply: a second one inside the window does not restart it.
+    Expire { Within = App.Setting<ConversationsSetup>().ContinueByAfter ?? TimeSpan.Zero; Accrues = false; }
+    on Replied { }
+    on Expire {
+      var seat = this.Item;
+      var setup = App.Setting<ConversationsSetup>();
+      var channel = ChannelReaching(setup.ContinueOn);
+      // Nothing to send it on, nobody to send it to, or nothing they have not read: no mail.
+      if (setup.ContinueByAfter == null || channel == null || seat.Party == null || seat.LeftAt != null) { goto None; }
+      var unread = UnreadToMail(seat, channel!.Key, null);
+      if (unread.Count == 0) { goto None; }
+      var point = ReachOn(seat.Party!, channel!.Reaches);
+      if (point == null) { goto None; }
+      // ONE delivery, on the newest of them; it carries the rest (`ConversationDelivery`).
+      new MessageDelivery { Message = unread[unread.Count - 1], ChannelKey = channel!.Key, To = point!.Value,
+                            FollowUpFor = seat };
+      goto Sent;
+    }
+  }
+
+  state Sent {
+    on Replied { goto Pending; }
+  }
+}
+
+/// A reply was posted in the chat: start the reply-by-mail clock on every customer seat of the conversation that has
+/// none running — the seat's first such reply starts its run (in `Pending`), a later one raises `Replied` on it.
+/// Nothing when the app mails no follow-ups.
+[SuppressWarning("cost-unbounded-read")]   // one conversation's seats
+void FollowUpLater(Conversation conversation) {
+  if (App.Setting<ConversationsSetup>().ContinueByAfter == null) { return; }
+  var seats = Participant.Where(p => p.Conversation == conversation && p.LeftAt == null && p.Party != null
+    && (p.Role == ParticipantRole.Customer || p.Role == ParticipantRole.Cc) && p.FollowUp != FollowUpState.Pending).ToList();
+  foreach (var seat in seats) {
+    if (seat.FollowUpStartedAt == null) {
+      seat.FollowUpStartedAt = DateTime.UtcNow;
+      Workflow.Run(seat);
+    } else {
+      WebFollowUp.RaiseReplied(seat);
+    }
+  }
+}
+
+/// The replies `seat` has not read and no send on `channelKey` has carried yet (other than `beside`, the send being
+/// made now), oldest first — what a follow-up mails.
+[SuppressWarning("cost-unbounded-read")]   // one seat's unread replies — what the follow-up mails
+List<Message> UnreadToMail(Participant seat, string channelKey, MessageDelivery? beside) {
+  var mark = seat.LastReadSequence;
+  var replies = Message.Where(m => m.Conversation == seat.Conversation && m.Sequence > mark
+      && m.Visibility == EntryVisibility.Customer && m.Direction == MessageDirection.Outbound)
+    .OrderBy(m => m.Sequence).ToList();
+  List<Message> unread = [];
+  foreach (var m in replies) {
+    var mailed = beside == null
+      ? MessageDelivery.Any(d => d.Message == m && d.ChannelKey == channelKey)
+      : MessageDelivery.Any(d => d.Message == m && d.ChannelKey == channelKey && d.Id != beside!.Id);
+    if (!mailed) { unread.Add(m); }
+  }
+  return unread;
+}
+
+/// An absolute continue link for `seat`.
+string ContinueLinkFor(Participant seat) {
+  var path = App.Setting<ConversationsSetup>().ContinuePath;
+  return App.BaseUrl.TrimEnd('/') + path.Replace("{link}", $"{ConversationContinueLink.For(seat.Party!)}");
+}
+
+/// What the widget tells a customer before they start, when the desk mails its chat replies to one who has left — or
+/// "" when it does not (and the widget then asks for no address).
+[AllowAnonymous]
+public string ChatMailNotice() {
+  var setup = App.Setting<ConversationsSetup>();
+  if (setup.ContinueByAfter == null || ChannelReaching(setup.ContinueOn) == null) { return ""; }
+  return setup.Copy.WidgetMailNotice();
+}
+
+/// What the chat widget says — the app's `ConversationCopy`, in the reader's language. The defaults are the kit's own,
+/// so a widget shows them while the app's words are on their way.
+public class WidgetWords {
+  public string Title = "Chat with us";
+  public string Intro = "Ask us anything — we read every message.";
+  public string NameLabel = "Your name";
+  public string EmailLabel = "Your email";
+  public string Optional = "Optional";
+  public string MessageLabel = "Your message";
+  public string Attach = "Attach files";
+  public string Start = "Start the conversation";
+  public string WriteFirst = "Write a message first.";
+  /// Under the address field, where replies follow by mail; "" where they do not (and then no address is asked for).
+  public string MailNotice = "";
+  public string LauncherLabel = "Chat with us";
+  public string LauncherClose = "Close the chat";
+}
+
+/// The widget's words, from the app's copy — one call as the widget opens.
+[AllowAnonymous]
+public WidgetWords ChatWidgetWords() {
+  var copy = App.Setting<ConversationsSetup>().Copy;
+  return new WidgetWords {
+    Title = copy.WidgetTitle(), Intro = copy.WidgetIntro(), NameLabel = copy.WidgetNameLabel(),
+    EmailLabel = copy.WidgetEmailLabel(), Optional = copy.WidgetOptional(), MessageLabel = copy.WidgetMessageLabel(),
+    Attach = copy.WidgetAttach(), Start = copy.WidgetStart(), WriteFirst = copy.WidgetWriteFirst(),
+    MailNotice = ChatMailNotice(), LauncherLabel = copy.LauncherLabel(), LauncherClose = copy.LauncherClose(),
+  };
+}
+
+/// An address the customer typed in the widget, as a CLAIM on their own party — where a follow-up goes, never proof
+/// of anything (`verification-is-proof-not-assertion`): it is not attached to any other party holding that address.
+void ClaimAddress(Party party, string email) {
+  var address = email.Trim().ToLower();
+  if (address == "") { return; }
+  if (!address.Contains("@") || address.Contains(" ") || address.Length > 254) {
+    throw new ValidationException("That does not look like an email address — check it, or leave it empty.");
+  }
+  if (!ContactPoint.Any(p => p.Party == party && p.Kind == ContactPointKind.Email && p.Value == address)) {
+    new ContactPoint { Party = party, Kind = ContactPointKind.Email, Value = address, IsPreferred = true };
+  }
+}
+
+// SECURITY-INVARIANT(a-continue-link-works-once): the browser that opens a continue link becomes the party it was mailed
+// to — a Visitor point of ITS OWN visit (the floor: visitor-point-is-the-visitors-own), on THAT party (the grant's create
+// rule) — and every continue link to the party is then taken back, so a forwarded or scanned mail opens nothing.
+// Guarded by tests/continuation.test.osy (the_continue_link_opens_the_conversation_once_and_then_never_again).
+/// The continue link, pressed: THIS browser becomes the party the link was mailed to — a `Visitor` point of its own
+/// visit on that party — and every continue link to the party is taken back, so it works once. A link that is not one
+/// (forged, expired, already used) never gets here: the platform refuses it first.
+[AllowAnonymous]
+public void ContinueHere(ConversationContinueLink link) {
+  var party = link.Row;
+  var visit = Visitor.Id;
+  if (visit == null) {
+    throw new ValidationException("This browser cannot keep a conversation — let it keep cookies for this site and open the link again.");
+  }
+  // Already this party's browser (the one it started in, or one continued before): nothing to add.
+  if (!IsParty(party.Id)) {
+    new ContactPoint { Party = party, Kind = ContactPointKind.Visitor, Value = visit! };
+    UnitOfWork.Commit();
+  }
+  ConversationContinueLink.RevokeAll(party);
+}
+
+/// Where the continue page sends the browser once it is continued.
+[AllowAnonymous]
+public string ChatPath() {
+  return App.Setting<ConversationsSetup>().ChatPath;
+}
+
+/// A language's name, for a reader — "Swedish" for `sv`. The tag itself for one this list does not know; "another
+/// language" for none. Runs wherever it is called — a page names a language without asking the server.
+public string LanguageNameOf(string tag) {
+  var t = tag.Trim().ToLower();
+  if (t == "") { return "another language"; }
+  var dash = t.IndexOf("-");
+  var b = dash < 0 ? t : t.Substring(0, dash);
+  if (b == "en") { return "English"; }   if (b == "sv") { return "Swedish"; }   if (b == "de") { return "German"; }
+  if (b == "fr") { return "French"; }    if (b == "es") { return "Spanish"; }   if (b == "fi") { return "Finnish"; }
+  if (b == "nb" || b == "no" || b == "nn") { return "Norwegian"; }              if (b == "da") { return "Danish"; }
+  if (b == "nl") { return "Dutch"; }     if (b == "it") { return "Italian"; }   if (b == "pt") { return "Portuguese"; }
+  if (b == "pl") { return "Polish"; }    if (b == "ar") { return "Arabic"; }    if (b == "zh") { return "Chinese"; }
+  if (b == "ja") { return "Japanese"; }  if (b == "uk") { return "Ukrainian"; } if (b == "tr") { return "Turkish"; }
+  if (b == "ru") { return "Russian"; }   if (b == "fa") { return "Persian"; }   if (b == "he") { return "Hebrew"; }
+  if (b == "el") { return "Greek"; }     if (b == "ko") { return "Korean"; }    if (b == "hi") { return "Hindi"; }
+  if (b == "ur") { return "Urdu"; }      if (b == "th") { return "Thai"; }
+  return tag;
+}

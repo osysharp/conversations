@@ -1,0 +1,502 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+using Osysharp.Workflow;
+
+// ── the channel contract ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A CHANNEL is a way to reach a party — email, text messages, later WhatsApp. An adapter package implements
+// `IConversationChannel` (sending) and calls `ReceiveInbound` (receiving) and `DeliveryReport` (what the carrier said);
+// the app names its channels in `app.Conversations = new ConversationsSetup { Channels = [ … ] }`. The web channel — the
+// widget and the portal — is built in: there, the entry existing IS the delivery.
+//
+// ⚑ VERSION 0 IS DELIBERATELY SMALL: four members. Everything a later version adds comes with a default body, so an
+//   adapter written against 0.x keeps compiling (D-CONTRACTS1).
+
+/// What one outbound message carries to a channel.
+public class OutboundMessage {
+  /// The contact point it goes to — an address, a number.
+  public string To = "";
+  /// Our endpoint — the address or number the conversation arrived on (`Conversation.ReplyEndpoint`), or "" for the
+  /// channel's default.
+  public string From = "";
+  /// The conversation's subject.
+  public string Subject = "";
+  /// The text THE CUSTOMER RECEIVES.
+  public string Text = "";
+  /// This conversation's ids on THIS channel, oldest first (an email's References).
+  public List<string> ThreadKeys = [];
+  /// The id of the inbound message being answered, or "" (an email's In-Reply-To).
+  public string InReplyTo = "";
+  /// The conversation it belongs to — for an adapter that threads by an address of its own (an email's plus-addressed
+  /// Reply-To), so an answer that dropped every thread id still finds its way back.
+  public Guid ConversationId = Guid.Empty;
+  /// For the "you have unread replies" follow-up (`WebFollowUp`): the link that continues the conversation in any
+  /// browser — already in `Text`, and here for an adapter that shows it as a button. "" on an ordinary reply.
+  public string ContinueLink = "";
+  /// The files the reply carries — a screenshot an agent annotated, a fixed file (0.8.0). An adapter that cannot send
+  /// files sends the text, and the files stay on the timeline.
+  public List<OutboundFile> Files = [];
+  /// Nobody has written to us in this conversation yet — the desk is the one starting it (a side conversation, a call
+  /// taken down as an outbound mail): an adapter does not dress it as an answer ("Re: …") (0.19.0).
+  public bool StartsTheThread = false;
+}
+
+/// What an adapter hands the kit when something arrives — plain data. The adapter has already verified its source
+/// (a signed webhook, a connected mailbox).
+public class InboundMessage {
+  /// Must match a configured channel's `Key`.
+  public string ChannelKey = "";
+  /// Where it arrived — our address or number.
+  public string Endpoint = "";
+  /// Who sent it — an address, a number — and the name they gave.
+  public string From = "";
+  public string FromName = "";
+  /// Everyone else it was addressed to (an email's other To and Cc) — evidence of who was in the thread.
+  public List<string> AlsoTo = [];
+  /// Its own id on the channel — the same id twice is the same message.
+  public string ExternalId = "";
+  /// The ids it says it answers (an email's In-Reply-To and References), or the channel's thread id.
+  public List<string> ThreadKeys = [];
+  public string Subject = "";
+  public string Text = "";
+  /// An auto-reply, a bounce, an out-of-office, as the adapter judged — recorded, never answered, never a conversation.
+  public bool IsAutomatic;
+  /// What the sender's client QUOTED under `Text` (earlier messages, a signature) — kept, shown on request. "" for none.
+  public string QuotedText = "";
+  /// The files it carried (0.8.0).
+  public List<InboundFile> Files = [];
+  /// The whole message as it arrived, already stored by the adapter (a mail's .eml) — kept beside the message.
+  public FileAsset? Original = null;
+}
+
+/// What `ReceiveInbound` did.
+public class InboundResult {
+  public Conversation? Conversation;
+  public Message? Message;
+  /// The same message had arrived before — nothing new was written.
+  public bool Duplicate;
+  /// A new conversation was started for it.
+  public bool Started;
+  /// It was an auto-reply: recorded as an internal event, not a message.
+  public bool Automatic;
+}
+
+/// A way to reach a party. Implement it in an adapter package; name instances in `app.Conversations.Channels`.
+public interface IConversationChannel {
+  /// Stable, and recorded on every message and delivery — "email", "sms". Never renamed.
+  string Key { get; }
+  /// Which kind of contact point it reaches.
+  ContactPointKind Reaches { get; }
+  /// Can it send right now — its credentials and carrier set? A channel that is not ready leaves replies HELD.
+  bool IsReady();
+  /// Send one customer-visible message to one contact point. Answer the channel's id for it — it becomes a thread key,
+  /// so a reply to it continues the conversation. Throw `ExternalServiceException` to be retried; `idempotencyKey` is
+  /// stable per delivery.
+  string Send(OutboundMessage message, string idempotencyKey);
+
+  // ── added with defaults: an adapter that omits them keeps compiling ──
+  /// Does the channel carry its own threading (email headers)? One that does not (SMS) is threaded by the WINDOW rule:
+  /// a message from the same sender to the same endpoint within `ThreadWindow` continues their latest conversation.
+  bool ThreadsNatively() => true;
+  /// Why it is not ready, in a sentence the desk can act on — written on each delivery it leaves held.
+  string NotReadyReason() => $"The '{Key}' channel is not ready — its settings are not complete.";
+  /// A person is being forgotten: erase what THIS channel keeps of what was sent to `to` (an address, a number) — the
+  /// mail or text outbox. Nothing, by default.
+  void EraseCopiesTo(string to) { }
+  /// A message is being erased (the desk's words about somebody being forgotten): erase what THIS channel keeps of the
+  /// one copy it sent, by the id `Send` answered for it. Nothing, by default.
+  void EraseCopyOf(string externalId) { }
+  /// The longest text it carries in one message, or 0 for no limit. A reply longer than this is refused when it is
+  /// WRITTEN, with a sentence — not held later by a carrier that cuts it (an SMS channel answers 1530).
+  int MaxLength() => 0;
+}
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+/// Where one delivery has got to on its way out — driven by `ConversationDelivery`, nobody else.
+public enum DeliveryState {
+  [Label("Waiting")] Queued,
+  [Label("Sent")] Sent,
+  [Label("Not sent")] Held,
+  [Label("Waiting for its translation")] AwaitingLanguage,
+}
+
+/// What the carrier said afterwards — `DeliveryReport`'s to write.
+public enum DeliveryOutcome {
+  [Label("Delivered")] Delivered,
+  [Label("Read")] Read,
+  [Label("Failed")] Failed,
+}
+
+/// One delivery of a customer-visible message on one channel, to one contact point — the outbox row. A message can go
+/// out on several (shown in the widget AND mailed as the "you have unread replies" follow-up).
+[Authority(Extensible)]
+public entity MessageDelivery {
+  [Required] Message Message;
+  [Required, MaxLength(40)] string ChannelKey;
+  /// The contact point it goes to.
+  [Classification(Personal.Contact), MaxLength(255)] string? To;
+  DeliveryState State;                                  // no default — ConversationDelivery owns it
+  DeliveryOutcome? Outcome;
+  /// The channel's id for it (an email's Message-ID) — also registered as a thread key.
+  [MaxLength(255)] string? ExternalId;
+  DateTime? SentAt;
+  DateTime? ReportedAt;
+  /// Why it was held, or why the carrier failed it.
+  [MaxLength(500)] string? Problem;
+  /// The language the party it goes to reads — the rendering of that language is what is sent (`TextSentIn`).
+  [MaxLength(35)] string? Language;
+  /// The unread follow-up to this seat (`WebFollowUp`): the one send carries every reply the seat had not read, and a
+  /// continue link. Its message is the newest of them.
+  Participant? FollowUpFor;
+  /// This message went out INSIDE another delivery — a follow-up that carried it — so it was sent when that one was.
+  MessageDelivery? CarriedIn;
+
+  security {
+    // The delivery record is the desk's — a customer reads the conversation, never its plumbing (addresses, carrier ids).
+    deny read when !IsConversationStaff;
+    deny create when !IsConversationStaff;
+    deny update Message;
+    deny update ChannelKey;
+  }
+}
+
+/// A channel-side id this conversation answers to — every Message-ID sent or received in it, an SMS thread, a WhatsApp
+/// conversation id. An inbound message is matched by these.
+[Unique(ChannelKey, Key)]
+[Authority(Extensible)]
+public entity ConversationThreadKey {
+  [Required] Conversation Conversation;
+  [Required, MaxLength(40)] string ChannelKey;
+  [Required, MaxLength(255)] string Key;
+
+  security {
+    deny read when !IsConversationStaff;
+    deny create when !IsConversationStaff;
+    deny update when !IsConversationStaff;
+  }
+}
+
+/// Sends each delivery after the commit that wrote it — the shape of the Mail and Sms outboxes, for the same reason: a
+/// reply is written inside somebody's commit, and a carrier must not be called inside it.
+public workflow ConversationDelivery {
+  Tracks    = MessageDelivery.State;
+  Autostart = true;
+  Initial   = Queued;
+
+  /// The message's language work ended (`MessageLanguage`) — its renderings are made, or will not be.
+  event LanguageReady();
+
+  state Queued {
+    enter {
+      // The second lock: whatever wrote this row, only a CUSTOMER-visible message ever leaves.
+      if (this.Item.Message.Visibility != EntryVisibility.Customer) {
+        this.Item.Problem = "Only a customer-visible message is delivered — this one is internal.";
+        goto Held;
+      }
+      // Carried inside a follow-up that has already gone — it is written only after that send.
+      if (this.Item.CarriedIn != null) { goto Sent; }
+      // Its rendering in the customer's language is still being made — wait for it (a quarter of an hour at most).
+      if (LanguagePending(this.Item.Message)) { goto AwaitingLanguage; }
+      if (this.Item.To == null || this.Item.To == "") {
+        this.Item.Problem = $"There is no {this.Item.ChannelKey} address to send this to — add one to the customer.";
+        goto Held;
+      }
+      var channel = ChannelFor(this.Item.ChannelKey);
+      if (channel == null) {
+        this.Item.Problem = $"No channel '{this.Item.ChannelKey}' is set up — name one in app.Conversations.Channels.";
+        goto Held;
+      }
+      if (!channel.IsReady()) {
+        this.Item.Problem = channel.NotReadyReason();
+        goto Held;
+      }
+    }
+    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    on Expire {
+      var delivery = this.Item;
+      var message = delivery.Message;
+      var conversation = message.Conversation;
+      var channel = ChannelFor(delivery.ChannelKey)!;
+      var keys = ConversationThreadKey.Where(k => k.Conversation == conversation && k.ChannelKey == delivery.ChannelKey)
+        .OrderBy(k => k.CreatedAt).Select(k => k.Key).ToList();
+      var answering = Message.Where(m => m.Conversation == conversation && m.Direction == MessageDirection.Inbound
+          && m.ChannelKey == delivery.ChannelKey && m.ExternalId != null)
+        .OrderByDescending(m => m.Sequence).FirstOrDefault();
+      var outbound = new OutboundMessage {
+        // From the endpoint the customer last wrote to ON THIS CHANNEL — not the conversation's reply endpoint, which
+        // is another channel's when the reply goes somewhere new (a chat's "portal" is no address to mail from).
+        To = delivery.To ?? "", From = answering == null ? "" : answering.Endpoint ?? "", Subject = conversation.Subject ?? "",
+        // The text THEY are sent — their rendering, when they read another language.
+        Text = TextSentIn(message, delivery.Language), ThreadKeys = keys, InReplyTo = answering == null ? "" : answering.ExternalId ?? "",
+        ConversationId = conversation.Id, Files = FilesOf(message),
+        StartsTheThread = !Message.Any(m => m.Conversation == conversation && m.Direction == MessageDirection.Inbound),
+      };
+      // The unread follow-up: every reply the seat has not read and no earlier send carried, and the continue link.
+      List<Message> carried = [];
+      if (delivery.FollowUpFor != null) {
+        var seat = delivery.FollowUpFor!;
+        carried = UnreadToMail(seat, delivery.ChannelKey, delivery);
+        var link = ContinueLinkFor(seat);
+        List<FollowUpReply> replies = [];
+        foreach (var m in carried) {
+          replies.Add(new FollowUpReply { By = m.ByName == "" ? "Support" : m.ByName, At = m.At, Text = TextSentIn(m, delivery.Language) });
+        }
+        outbound.Text = App.Setting<ConversationsSetup>().Copy.FollowUp(replies, link);
+        outbound.ContinueLink = link;
+      }
+      var id = channel.Send(outbound, "delivery-" + delivery.Id.ToString());
+      var now = DateTime.UtcNow;
+      delivery.ExternalId = id;
+      delivery.SentAt = now;
+      delivery.Problem = null;
+      // Each reply the follow-up carried is recorded as delivered on this channel too — so the desk reads it as mailed,
+      // and the next follow-up does not mail it again.
+      foreach (var m in carried) {
+        if (m.Id != message.Id) {
+          new MessageDelivery { Message = m, ChannelKey = delivery.ChannelKey, To = delivery.To, ExternalId = id, SentAt = now,
+                                CarriedIn = delivery };
+        }
+      }
+      // The id it went out under is one the customer's reply will quote — so the reply finds this conversation.
+      if (id != "" && !ConversationThreadKey.Any(k => k.ChannelKey == delivery.ChannelKey && k.Key == id)) {
+        new ConversationThreadKey { Conversation = conversation, ChannelKey = delivery.ChannelKey, Key = id };
+      }
+      goto Sent;
+    }
+  }
+
+  /// Waiting for the customer's rendering — sent the moment it is made, or after a quarter of an hour in the original.
+  state AwaitingLanguage {
+    on LanguageReady { goto Queued; }
+    Expire { Within = TimeSpan.FromMinutes(15); Accrues = false; }
+    on Expire { goto Queued; }
+  }
+
+  terminal success Sent { }
+  terminal cancel Held { }
+}
+
+/// The configured channel with this key, or null.
+public IConversationChannel? ChannelFor(string channelKey) {
+  foreach (var channel in App.Setting<ConversationsSetup>().Channels) {
+    if (channel.Key == channelKey) { return channel; }
+  }
+  return null;
+}
+
+/// The point a delivery on `channel` goes to for `party` — a preferred one of the channel's kind, else the newest.
+ContactPoint? ReachOn(Party party, ContactPointKind kind) {
+  var preferred = ContactPoint.FirstOrDefault(p => p.Party == party && p.Kind == kind && p.IsPreferred);
+  if (preferred != null) { return preferred; }
+  return ContactPoint.Where(p => p.Party == party && p.Kind == kind).OrderByDescending(p => p.CreatedAt).FirstOrDefault();
+}
+
+/// Queue a customer-visible message for delivery on `channelKey` to every customer and copied party of its
+/// conversation. Nothing for the web — there the entry is the delivery.
+[SuppressWarning("cost-unbounded-read")]   // one conversation's seats
+void QueueDeliveries(Message message, string channelKey) {
+  if (channelKey == "web" || channelKey == "internal") { return; }
+  var channel = ChannelFor(channelKey);
+  var seats = Participant.Where(p => p.Conversation == message.Conversation && p.LeftAt == null && p.Party != null
+    && (p.Role == ParticipantRole.Customer || p.Role == ParticipantRole.Cc)).ToList();
+  foreach (var seat in seats) {
+    var point = channel == null ? null : ReachOn(seat.Party!, channel.Reaches);
+    new MessageDelivery { Message = message, ChannelKey = channelKey, To = point == null ? null : point.Value,
+                          Language = seat.Party!.Language };
+  }
+}
+
+// ── receiving ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// An adapter's receiver calls this when something arrives. Idempotent on (channel, id). Finds who sent it, which
+/// conversation it continues (or starts one), and appends it — and an auto-reply is recorded as an internal event,
+/// never answered and never a conversation of its own. Runs as the receiver's account, which must be staff.
+public InboundResult ReceiveInbound(InboundMessage inbound) {
+  var result = new InboundResult();
+  var channel = ChannelFor(inbound.ChannelKey);
+  if (channel == null) {
+    throw new ValidationException($"No channel '{inbound.ChannelKey}' is set up — name it in app.Conversations.Channels.");
+  }
+
+  // 1 · the same message again (the carrier redelivered it): answer what was written the first time.
+  if (inbound.ExternalId != "") {
+    var seen = Message.FirstOrDefault(m => m.ChannelKey == inbound.ChannelKey && m.ExternalId == inbound.ExternalId);
+    if (seen != null) {
+      result.Duplicate = true;
+      result.Message = seen;
+      result.Conversation = seen.Conversation;
+      return result;
+    }
+  }
+
+  var from = NormalisedPoint(channel.Reaches, inbound.From);
+
+  // 2 · an auto-reply: a fact on the conversation it answers, if any — never a message, never answered, and never a
+  //     new party: a bounce comes from `mailer-daemon@`, which is nobody the desk should ever list as a customer.
+  if (inbound.IsAutomatic) {
+    result.Automatic = true;
+    var sender = PartyKnownBy(channel.Reaches, from);
+    var answered = MatchConversation(channel, inbound, sender);
+    if (answered != null) {
+      // Where it came from is a fact of the line — and, when it is a party's address, which party: erasing who they are
+      // reaches it here too.
+      var auto = Record(answered, "conversations.auto-reply", "Osysharp.Conversations");
+      auto.Person = from;
+      auto.PersonParty = sender;
+      result.Conversation = answered;
+    }
+    return result;
+  }
+
+  var party = PartyReachedBy(channel.Reaches, from, inbound.FromName);
+  var matched = MatchConversation(channel, inbound, party);
+
+  // 3 · the join check (SECURITY-INVARIANT inbound-joins-only-its-own-thread): a matched thread is continued only by
+  //     someone who is in it or was written to in it.
+  var now = DateTime.UtcNow;
+  Conversation conversation;
+  Conversation? related = null;
+  if (matched != null && IsInThread(matched, party, from)) {
+    conversation = matched;
+    if (!Participant.Any(p => p.Conversation == conversation && p.Party == party)) {
+      new Participant { Conversation = conversation, Party = party, Role = ParticipantRole.Cc, JoinedAt = now };
+    }
+  } else {
+    related = matched;
+    conversation = new Conversation { Subject = inbound.Subject.Trim() == "" ? null : inbound.Subject.Trim(), StartedAt = now };
+    new Participant { Conversation = conversation, Party = party, Role = ParticipantRole.Customer, JoinedAt = now };
+    result.Started = true;
+  }
+
+  // 4 · append, register its ids, move the clocks.
+  var message = new Message {
+    Conversation = conversation, At = now, Visibility = EntryVisibility.Customer, Direction = MessageDirection.Inbound,
+    ChannelKey = inbound.ChannelKey, Endpoint = inbound.Endpoint == "" ? null : inbound.Endpoint,
+    // Scrubbed as it is stored: a card number mailed or texted to the desk is never kept.
+    Text = App.Setting<ConversationsSetup>().Redactor.ScrubAtRest(inbound.Text),
+    ExternalId = inbound.ExternalId == "" ? null : inbound.ExternalId, AlsoTo = string.Join(",", inbound.AlsoTo),
+    ByParty = party, ByName = party.DisplayName,
+    QuotedText = inbound.QuotedText.Trim() == "" ? null : App.Setting<ConversationsSetup>().Redactor.ScrubAtRest(inbound.QuotedText),
+    Original = inbound.Original,
+  };
+  ApplyLanguage(message);
+  // Its files, kept whatever they are — a received message is never lost (Attachments.osy).
+  AttachReceived(message, inbound.Files);
+  RegisterThreadKey(conversation, inbound.ChannelKey, inbound.ExternalId);
+  foreach (var key in inbound.ThreadKeys) {
+    // A key that already belongs to ANOTHER conversation stays there — one id, one conversation.
+    RegisterThreadKey(conversation, inbound.ChannelKey, key);
+  }
+  conversation.LastEntryAt = now;
+  conversation.LastCustomerEntryAt = now;
+  conversation.ReplyChannel = inbound.ChannelKey;
+  conversation.ReplyEndpoint = inbound.Endpoint == "" ? null : inbound.Endpoint;
+  if (related != null) {
+    Record(conversation, "conversations.possibly-related", "Osysharp.Conversations");
+  }
+  // An answer in a SIDE conversation is told on the conversation it is beside — where the desk is working — and opens
+  // the side conversation again if it was set aside.
+  if (conversation.SideOf != null) { NoteSideAnswer(conversation, party); }
+
+  result.Conversation = conversation;
+  result.Message = message;
+  return result;
+}
+
+/// An adapter's delivery-report handler calls this — the carrier delivered, the reader opened, the address bounced.
+/// Moves the delivery's outcome and nothing else.
+public void DeliveryReport(string channelKey, string externalId, DeliveryOutcome outcome, string? problem = null) {
+  var delivery = MessageDelivery.FirstOrDefault(d => d.ChannelKey == channelKey && d.ExternalId == externalId);
+  if (delivery == null) { return; }
+  delivery.Outcome = outcome;
+  delivery.ReportedAt = DateTime.UtcNow;
+  if (problem != null) { delivery.Problem = problem; }
+}
+
+/// An address, a number — as every comparison spells it (an address trimmed and lower-cased).
+string NormalisedPoint(ContactPointKind kind, string value) {
+  var v = value.Trim();
+  return kind == ContactPointKind.Email ? v.ToLower() : v;
+}
+
+/// Who already holds `value` on a channel of `kind`: the party holding it PROVEN, else the newest party claiming it, or
+/// null. A merged party resolves to its survivor.
+public Party? PartyKnownBy(ContactPointKind kind, string value) {
+  var proven = ContactPoint.FirstOrDefault(p => p.Kind == kind && p.Value == value && p.VerifiedKey != null);
+  var claimed = proven ?? ContactPoint.Where(p => p.Kind == kind && p.Value == value)
+    .OrderByDescending(p => p.CreatedAt).FirstOrDefault();
+  if (claimed == null) { return null; }
+  return Survivor(claimed.Party);
+}
+
+/// A party, or — when it was merged — the party it lives on as.
+public Party Survivor(Party party) {
+  var p = party;
+  while (p.MergedInto != null) { p = p.MergedInto; }
+  return p;
+}
+
+/// Who wrote from `value` on a channel of `kind` — the app's `PartyKinds.Resolve` (the party already holding it, else a
+/// new one of the app's kind with it as a claim).
+Party PartyReachedBy(ContactPointKind kind, string value, string displayName) {
+  return App.Setting<ConversationsSetup>().Parties.Resolve(kind, value, displayName.Trim() == "" ? value : displayName.Trim());
+}
+
+/// The conversation an inbound message continues, by its channel's threading, or null.
+Conversation? MatchConversation(IConversationChannel channel, InboundMessage inbound, Party? party) {
+  if (channel.ThreadsNatively()) {
+    var keys = inbound.ThreadKeys;
+    var known = ConversationThreadKey.Where(k => k.ChannelKey == inbound.ChannelKey && keys.Contains(k.Key))
+      .OrderByDescending(k => k.CreatedAt).FirstOrDefault();
+    return known == null ? null : known.Conversation;
+  }
+  // The WINDOW rule, for a channel with no threading of its own (SMS): the latest conversation this party is in on
+  // this channel and endpoint, if it moved within the window. Nobody known: nothing to continue.
+  if (party == null) { return null; }
+  var since = DateTime.UtcNow - App.Setting<ConversationsSetup>().ThreadWindow;
+  var seat = Participant.Where(p => p.Party == party && p.Conversation.ReplyChannel == inbound.ChannelKey
+      && p.Conversation.ReplyEndpoint == inbound.Endpoint && p.Conversation.LastEntryAt != null
+      && p.Conversation.LastEntryAt > since)
+    .OrderByDescending(p => p.Conversation.LastEntryAt).FirstOrDefault();
+  return seat == null ? null : seat.Conversation;
+}
+
+/// Is `party` (writing from `from`) in `conversation`'s thread — seated in it, or written to in it (a prior recipient)?
+/// A thread id alone is not enough: ids leak (a forwarded mail quotes them).
+// SECURITY-INVARIANT(inbound-joins-only-its-own-thread): an inbound message whose thread ids match a conversation
+// continues it ONLY when its sender is seated in it or was written to in it. A Message-ID alone admits nobody — ids leak
+// (a forwarded mail quotes them), and a stranger appended to someone's conversation would read every reply sent to it.
+// Guarded by tests/channels.test.osy (a_stranger_quoting_a_thread_starts_a_new_conversation; the Cc control,
+// a_ccd_person_replying_joins_as_cc).
+[SuppressWarning("cost-unbounded-read")]   // one conversation's inbound messages that copied someone
+bool IsInThread(Conversation conversation, Party party, string from) {
+  if (Participant.Any(p => p.Conversation == conversation && p.Party == party && p.LeftAt == null)) { return true; }
+  if (MessageDelivery.Any(d => d.Message.Conversation == conversation && d.To == from)) { return true; }
+  foreach (var m in Message.Where(m => m.Conversation == conversation && m.Direction == MessageDirection.Inbound
+                                    && m.AlsoTo != null).ToList()) {
+    foreach (var to in m.AlsoTo!.Split(",")) {
+      if (to.Trim().ToLower() == from) { return true; }
+    }
+  }
+  return false;
+}
+
+/// Record that `key` on `channelKey` belongs to `conversation` — unless it is empty or already belongs somewhere.
+void RegisterThreadKey(Conversation conversation, string channelKey, string key) {
+  if (key == "") { return; }
+  if (ConversationThreadKey.Any(k => k.ChannelKey == channelKey && k.Key == key)) { return; }
+  new ConversationThreadKey { Conversation = conversation, ChannelKey = channelKey, Key = key };
+}
+
+/// A message's files as a channel sends them — read as the delivery runs (the system), in the order they were attached.
+[SuppressWarning("cost-unbounded-read")]   // one message's files
+List<OutboundFile> FilesOf(Message message) {
+  List<OutboundFile> files = [];
+  foreach (var a in MessageAttachment.Where(a => a.Message == message).OrderBy(a => a.CreatedAt).ToList()) {
+    files.Add(new OutboundFile { FileName = a.FileName, ContentType = a.ContentType, ContentId = a.ContentId,
+                                 Content = File.ReadAllBytes(a.File) });
+  }
+  return files;
+}

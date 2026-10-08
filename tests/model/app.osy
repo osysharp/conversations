@@ -1,0 +1,200 @@
+// A tiny support desk — the smallest correct consumer of Osysharp.Conversations. Everything it writes about
+// conversations: who its staff are, what its staff may do, and its own kind of party.
+namespace ConversationsKitTests;
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+
+[Role] enum AppRole { Authenticator, Agent, Integration }
+
+/// The kit asks the app who its staff are — here, its agents and its integration account (what a mail receiver runs as).
+policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && (g.Role == AppRole.Agent || g.Role == AppRole.Integration));
+// Who sits on a conversation (and any record) with the desk — the Collaboration kit's question.
+policy CollaboratesOnRecords => IsConversationStaff;
+
+/// Everybody who signs in: agents, and customers who use the portal.
+entity Person : Principal {
+  /// Only the desk's people sign in with a password; a customer reaches the portal through the kit's flows.
+  [MaxLength(200)] string? PasswordHash;
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    deny read PasswordHash when !IsAuthenticator;
+  }
+}
+
+/// The desk's own kind of party — the SAME short name as the kit's base, on purpose: the namespace proof (D-CONVERSATIONS1 §0).
+entity Party : Osysharp.Conversations.Party {
+  [MaxLength(20)] string Tier = "standard";
+  security {
+    allow read, create, update when IsConversationStaff;
+    // A customer reads their own party — the kit's policy says who that is (an account, a visit, a continue link).
+    allow read when IsConversationCustomer where IsCustomerParty(Id);
+    // …and the sign-in flow links an account to its party (or makes one) — grants are never inherited, so it is said here.
+    allow read, create, update when IsAuthenticator;
+    allow create when IsAnonymous || IsAuthenticated;
+  }
+}
+
+// What the desk's staff may do — the kit grants the customer's side, the app grants its own people theirs.
+partial entity Osysharp.Conversations.Party { security { allow read, create, update when IsConversationStaff; } }
+partial entity ContactPoint { security { allow read, create, update when IsConversationStaff; } }
+partial entity Conversation { security { allow read, create, update when IsConversationStaff; } }
+partial entity Participant { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationEntry { security { allow read when IsConversationStaff; } }
+partial entity Message { security { allow read, create, update when IsConversationStaff; } }
+// The desk shows its signed-in customers the events on their timeline — a WIDE grant on purpose: the kit's floor still
+// keeps every internal event internal (`conversation-internal-stays-internal`), which security.test.osy proves.
+partial entity ConversationEvent {
+  security { allow read, create when IsConversationStaff; allow read when IsAuthenticated; }
+}
+partial entity MessageText { security { allow read, create when IsConversationStaff; } }
+partial entity MessageLanguageWork { security { allow read, create when IsConversationStaff; } }
+partial entity MessageAttachment { security { allow read, create when IsConversationStaff; } }
+partial entity MessageDelivery { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationThreadKey { security { allow read, create when IsConversationStaff; } }
+partial entity PartyMerge { security { allow read, create when IsConversationStaff; } }
+partial entity ConversationSplit { security { allow read, create when IsConversationStaff; } }
+partial entity PartyErasure { security { allow read when IsConversationStaff; } }
+// The desk sees how an address proof went (never its code: the kit denies that to everyone).
+partial entity PointCheck { security { allow read when IsConversationStaff; } }
+
+// ── the desk's channels: two that RECORD instead of sending — no test ever mails or texts anybody ──────────────────
+
+/// What a channel was handed — one row per send.
+entity Carried {
+  [Required, MaxLength(40)] string Channel;
+  [MaxLength(255)] string To = "";
+  [MaxLength(255)] string From = "";
+  [MaxLength(300)] string Subject = "";
+  [Required] string Text;
+  [MaxLength(2000)] string ThreadKeys = "";
+  [MaxLength(255)] string InReplyTo = "";
+  [MaxLength(255)] string SentId = "";
+  /// The continue link a follow-up carried, "" on an ordinary reply.
+  [MaxLength(1000)] string ContinueLink = "";
+  security { allow read, create when IsAuthenticated; }
+}
+
+/// A switch a test flips: this channel's credentials are missing.
+entity ChannelDown {
+  [Required, MaxLength(40)] string Channel;
+  security { allow read, create when IsAuthenticated; }
+}
+
+/// "email": threads natively (Message-IDs), answers a Message-ID for what it sent.
+public class RecordingMail : IConversationChannel {
+  public string Key { get; } = "email";
+  public ContactPointKind Reaches { get; } = ContactPointKind.Email;
+  public bool IsReady() { return !ChannelDown.Any(d => d.Channel == "email"); }
+  public string Send(OutboundMessage message, string idempotencyKey) {
+    var id = "<" + idempotencyKey + "@desk.test>";
+    new Carried { Channel = "email", To = message.To, From = message.From, Subject = message.Subject, Text = message.Text,
+                  ThreadKeys = string.Join(" ", message.ThreadKeys), InReplyTo = message.InReplyTo, SentId = id,
+                  ContinueLink = message.ContinueLink };
+    return id;
+  }
+}
+
+/// "sms": no threading of its own — the window rule threads it; it never names why it is not ready (the default does).
+public class RecordingSms : IConversationChannel {
+  public string Key { get; } = "sms";
+  public ContactPointKind Reaches { get; } = ContactPointKind.Phone;
+  public bool IsReady() { return !ChannelDown.Any(d => d.Channel == "sms"); }
+  public bool ThreadsNatively() { return false; }
+  public string Send(OutboundMessage message, string idempotencyKey) {
+    var id = "sms-" + idempotencyKey;
+    new Carried { Channel = "sms", To = message.To, From = message.From, Text = message.Text, SentId = id };
+    return id;
+  }
+}
+
+/// The shop says the widget's first line in its own words; every other word is the kit's.
+public class ShopCopy : ConversationCopy {
+  public override string WidgetIntro() { return "Ask the shop anything — we answer within the hour."; }
+}
+
+/// What the desk heard from the chat — so a test reads that the app was told, and how.
+entity Heard {
+  [Required, MaxLength(300)] string Says;
+  security { allow read, create when IsAnonymous || IsAuthenticated; }
+}
+
+/// The desk's ear on the chat: a line per message a customer wrote in it.
+public class HeardChat : ConversationEvents {
+  public override void CustomerWrote(Conversation c, string text, bool started) {
+    new Heard { Says = (started ? "started: " : "wrote: ") + text };
+    UnitOfWork.Commit();
+  }
+  public override void LanguageKnown(Conversation c, Osysharp.Conversations.Party party, string language) {
+    new Heard { Says = party.DisplayName + " writes " + language };
+  }
+  public override void SideAnswered(Conversation side) {
+    new Heard { Says = "answered beside: " + (side.Subject ?? "") };
+  }
+}
+
+/// Everything the desk's translator was handed — so a test can prove what never reached it (a card number).
+entity Handed {
+  [Required] string Text;
+  [MaxLength(10)] string To = "";
+  security { allow read, create when IsAnonymous || IsAuthenticated || IsAuthenticator; }
+}
+
+/// A switch a test flips: the translator's key is missing — as good as no translator at all.
+entity TranslatorDown {
+  bool Down = true;
+  security { allow read, create, update when IsAuthenticated; }
+}
+
+/// A switch a test flips: the translator's provider answers with an error on every call, until the row is deleted.
+entity TranslatorFails {
+  bool Fails = true;
+  security { allow read, create, delete when IsAuthenticated; }
+}
+
+/// A translator that needs no model: Swedish is recognised by its words, and a translation is the text tagged with its
+/// target — `[sv] …` — so a test reads exactly what was sent where.
+public class TaggingTranslator : IConversationTranslator {
+  public string Key { get; } = "tagging";
+  public bool IsReady() { return !TranslatorDown.Any(d => d.Down); }
+  public string NotReadyReason() { return "The tagging translator's key is missing."; }
+  public string Detect(string text) {
+    var t = " " + text.ToLower() + " ";
+    return t.Contains(" hej ") || t.Contains(" jag ") || t.Contains(" inte ") || t.Contains(" min ") || t.Contains(" är ")
+      ? "sv" : "en";
+  }
+  public string Translate(string text, string from, string to, List<GlossaryTerm> glossary) {
+    if (TranslatorFails.Any(f => f.Fails)) { throw new ExternalServiceException("the translation provider answered 503"); }
+    new Handed { Text = text, To = to };
+    return $"[{to}] {text}";
+  }
+}
+
+/// The desk's sign-in — the slot the sign-in flow's principal hangs on (`app.AuthBootstrap`, model/setup.osy). Tests
+/// mostly sign in with `runas`; this is the real door, for a person with a password.
+[AuthMethod]
+public string SignIn(string email, string password) {
+  var p = Person.Where(x => x.Email == email).FirstOrDefault();
+  if (p == null || p.PasswordHash == null) { Security.VerifyPassword(password); return ""; }
+  if (Security.VerifyPassword(password, p.PasswordHash)) { return Security.IssueJwt(p.Id, p.Email); }
+  return "";
+}
+
+/// The desk makes ITS kind of party for a new chatter, so a read through the kit's base answers a `ConversationsKitTests.Party`.
+public class DeskParties : PartyKinds {
+  public override Osysharp.Conversations.Party New(ContactPointKind kind, string value, string displayName) {
+    return new Party { DisplayName = displayName, Tier = "new" };
+  }
+  /// Erasing a person blanks the desk's own field too.
+  public override void Erase(Osysharp.Conversations.Party party) {
+    var p = party as Party;
+    if (p != null) { p.Tier = "erased"; }
+  }
+  /// Merging keeps the better tier of the two — the desk's own field, which the kit does not know.
+  public override void Merge(Osysharp.Conversations.Party kept, Osysharp.Conversations.Party absorbed) {
+    var k = kept as Party;
+    var a = absorbed as Party;
+    if (k != null && a != null && a.Tier == "gold") { k.Tier = "gold"; }
+  }
+}

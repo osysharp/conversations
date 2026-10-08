@@ -1,0 +1,240 @@
+// Osysharp.Conversations — the channel contract. Two channels that RECORD instead of sending (tests/model/app.osy):
+// "email" threads natively and answers a Message-ID; "sms" has no threading and the window rule threads it. Every test
+// asserts what the CARRIER was handed (`Carried`), or what the conversation now holds — never merely that a call
+// returned.
+//
+// The desk (Ada) and the mailbox's receiver (Inbox, the integration account) are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+/// A mail arriving at support@ — as the mail adapter's receiver would hand it over.
+InboundResult Mail(string from, string id, string text, string subject = "Help", string? answering = null, string alsoTo = "") {
+  var inbound = new InboundMessage {
+    ChannelKey = "email", Endpoint = "support@desk.test", From = from, FromName = "", ExternalId = id,
+    Subject = subject, Text = text,
+  };
+  if (answering != null) { inbound.ThreadKeys.Add(answering); }
+  if (alsoTo != "") { inbound.AlsoTo.Add(alsoTo); }
+  return ReceiveInbound(inbound);
+}
+
+InboundResult Text(string from, string id, string text) {
+  return ReceiveInbound(new InboundMessage {
+    ChannelKey = "sms", Endpoint = "+46700000000", From = from, ExternalId = id, Text = text,
+  });
+}
+
+/// Deliver everything queued — the outbox runs after the commit.
+[SuppressWarning("cost-unbounded-read")]   // a test settles everything its own small world queued
+void DeliverAll() {
+  foreach (var w in MessageLanguageWork.ToList()) { Workflow.Settle(w); }
+  foreach (var d in MessageDelivery.ToList()) { Workflow.Settle(d); }
+}
+
+[Test(Desk)]
+void a_reply_goes_out_on_the_channel_the_customer_last_wrote_on() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "My invoice is wrong."); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Subject == "Help");
+    Assert.Equal("email", c.ReplyChannel);
+    Post(c, "We have corrected it — a new invoice is attached.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    var sent = Carried.Single(x => x.Text.StartsWith("We have corrected it"));
+    Assert.Equal("email", sent.Channel);
+    Assert.Equal("ana@example.test", sent.To);
+    Assert.Equal("support@desk.test", sent.From);
+    Assert.Equal(DeliveryState.Sent, MessageDelivery.Single().State);
+  }
+}
+
+[Test(Desk)]
+void a_reply_carries_the_threads_ids_so_the_customers_client_threads_it() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "First."); UnitOfWork.Commit(); }
+  runas (Ada) {
+    Post(Conversation.Single(x => x.Subject == "Help"), "Answer.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    var sent = Carried.Single(x => x.Text == "Answer.");
+    Assert.Equal("<m1@example.test>", sent.InReplyTo);
+    Assert.Contains("<m1@example.test>", sent.ThreadKeys);
+  }
+}
+
+[Test(Desk)]
+void a_mail_answering_our_reply_continues_the_same_conversation() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "First."); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(x => x.Subject == "Help"), "Answer."); UnitOfWork.Commit(); DeliverAll(); }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single(x => x.Text == "Answer.").SentId; }
+  runas (Inbox) {
+    var r = Mail("ana@example.test", "<m2@example.test>", "Thanks, that works.", "Re: Help", ours);
+    UnitOfWork.Commit();
+    Assert.True(!r.Started);
+  }
+  runas (Ada) {
+    Assert.Equal(1, Conversation.Count());
+    Assert.Equal(3, ConversationEntry.Count(e => e.Conversation.Subject == "Help"));
+  }
+}
+
+[Test(Desk)]
+void the_same_inbound_message_delivered_twice_is_one_message() {
+  runas (Inbox) {
+    Mail("ana@example.test", "<dup@example.test>", "Once.");
+    UnitOfWork.Commit();
+    var again = Mail("ana@example.test", "<dup@example.test>", "Once.");
+    UnitOfWork.Commit();
+    Assert.True(again.Duplicate);
+  }
+  runas (Ada) { Assert.Equal(1, Message.Count(m => m.Text == "Once.")); }
+}
+
+[Test(Desk)]
+void a_stranger_quoting_a_thread_starts_a_new_conversation() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "Ana's private question."); UnitOfWork.Commit(); }
+  runas (Inbox) {
+    // Mallory saw the Message-ID in a forwarded mail and quotes it — she was never in the thread.
+    var r = Mail("mallory@example.test", "<x1@example.test>", "Let me in.", "Re: Help", "<m1@example.test>");
+    UnitOfWork.Commit();
+    Assert.True(r.Started);
+  }
+  runas (Ada) {
+    Assert.Equal(2, Conversation.Count());
+    // Ana's conversation is Ana's alone — Mallory is seated nowhere in it.
+    var anas = Message.Single(m => m.Text == "Ana's private question.").Conversation;
+    Assert.Equal(1, Participant.Count(p => p.Conversation == anas));
+    // …and the new one says it may be related, for the desk to judge.
+    Assert.Equal(1, ConversationEvent.Count(e => e.Kind == "conversations.possibly-related"));
+  }
+}
+
+[Test(Desk)]
+void a_ccd_person_replying_joins_as_cc() {
+  runas (Inbox) {
+    Mail("ana@example.test", "<m1@example.test>", "Copying my colleague.", "Help", null, "bo@example.test");
+    UnitOfWork.Commit();
+    Mail("bo@example.test", "<m2@example.test>", "Adding to what Ana said.", "Re: Help", "<m1@example.test>");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    Assert.Equal(1, Conversation.Count());
+    var bo = Participant.Single(p => p.Party != null && p.Party.DisplayName == "bo@example.test");
+    Assert.Equal(ParticipantRole.Cc, bo.Role);
+  }
+}
+
+[Test(Desk)]
+void an_auto_reply_is_recorded_and_never_answered() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "Question."); UnitOfWork.Commit(); }
+  runas (Inbox) {
+    var r = ReceiveInbound(new InboundMessage {
+      ChannelKey = "email", Endpoint = "support@desk.test", From = "ana@example.test", ExternalId = "<ooo@example.test>",
+      Subject = "Out of office", Text = "I am away until Monday.", IsAutomatic = true,
+      ThreadKeys = ["<m1@example.test>"],
+    });
+    UnitOfWork.Commit();
+    Assert.True(r.Automatic);
+  }
+  runas (Ada) {
+    Assert.Equal(1, Conversation.Count());
+    Assert.Equal(0, Message.Count(m => m.Text == "I am away until Monday."));
+    Assert.Equal(1, ConversationEvent.Count(e => e.Kind == "conversations.auto-reply"));
+    Assert.Equal(EntryVisibility.Internal, ConversationEvent.Single(e => e.Kind == "conversations.auto-reply").Visibility);
+  }
+}
+
+[Test(Desk)]
+void an_automatic_message_from_nobody_we_know_makes_no_party() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "Question."); UnitOfWork.Commit(); }
+  // A bounce: from the mail system itself, quoting the thread — recorded on the conversation it answers…
+  runas (Inbox) {
+    ReceiveInbound(new InboundMessage {
+      ChannelKey = "email", Endpoint = "support@desk.test", From = "MAILER-DAEMON@mx.example.test",
+      ExternalId = "<dsn@mx.example.test>", Subject = "Undelivered Mail", Text = "Delivery failed.", IsAutomatic = true,
+      ThreadKeys = ["<m1@example.test>"],
+    });
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    Assert.Equal(1, ConversationEvent.Count(e => e.Kind == "conversations.auto-reply"));
+    // …and nobody new is listed as a customer: the mail system is not a party.
+    Assert.Equal(0, ContactPoint.Count(p => p.Value == "mailer-daemon@mx.example.test"));
+    Assert.Equal(1, Osysharp.Conversations.Party.Count(p => p.DisplayName != "Cus" && p.DisplayName != "Dee"));
+  }
+}
+
+[Test(Desk)]
+void an_sms_within_the_window_continues_the_last_conversation_and_one_after_it_starts_a_new_one() {
+  runas (Inbox) {
+    Text("+46701234567", "sms-1", "Is my table ready?");
+    UnitOfWork.Commit();
+    Text("+46701234567", "sms-2", "Hello?");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal(1, Conversation.Count()); }
+  // Eight days pass on that conversation…
+  runas (Ada) {
+    var c = Conversation.Single();
+    c.LastEntryAt = DateTime.UtcNow.AddDays(-8);
+    UnitOfWork.Commit();
+  }
+  runas (Inbox) { Text("+46701234567", "sms-3", "New question."); UnitOfWork.Commit(); }
+  runas (Ada) { Assert.Equal(2, Conversation.Count()); }
+}
+
+[Test(Desk)]
+void a_note_is_never_sent_on_any_channel() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "Question."); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var c = Conversation.Single();
+    Post(c, "Ana is a VIP — answer first.", EntryVisibility.Internal);
+    // …and asking for a channel for a note is refused by name, not quietly ignored.
+    Assert.Throws(() => Post(c, "Also internal.", EntryVisibility.Internal, null, "email"));
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    Assert.Equal(0, Carried.Count());
+    Assert.Equal(0, MessageDelivery.Count());
+  }
+}
+
+[Test(Desk)]
+void with_no_ready_channel_the_reply_is_held_and_says_why() {
+  runas (Inbox) { Text("+46701234567", "sms-1", "Is my table ready?"); UnitOfWork.Commit(); }
+  runas (Ada) { new ChannelDown { Channel = "sms" }; UnitOfWork.Commit(); }
+  runas (Ada) {
+    Post(Conversation.Single(), "Yes — come in.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    var d = MessageDelivery.Single();
+    Assert.Equal(DeliveryState.Held, d.State);
+    // The channel declares no reason of its own, so the contract's default says which channel.
+    Assert.Equal("The 'sms' channel is not ready — its settings are not complete.", d.Problem);
+    Assert.Equal(0, Carried.Count());
+  }
+}
+
+[Test(Desk)]
+void a_delivery_report_moves_the_delivery_and_nothing_else() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "Question."); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(), "Answer."); UnitOfWork.Commit(); DeliverAll(); }
+  var id = "";
+  runas (Ada) { id = MessageDelivery.Single().ExternalId!; }
+  runas (Inbox) { DeliveryReport("email", id, DeliveryOutcome.Delivered); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var d = MessageDelivery.Single();
+    Assert.Equal(DeliveryOutcome.Delivered, d.Outcome!.Value);
+    Assert.Equal(DeliveryState.Sent, d.State);
+    Assert.Equal(2, ConversationEntry.Count());
+  }
+}

@@ -1,0 +1,71 @@
+// Osysharp.Conversations — memory. Every message's canonical copy (redacted, in the desk's language) is in the shared
+// corpus, so a conversation is found whatever language and channel it was held in — and only through a message the
+// searcher may read.
+//
+// The tests index and search with `WordsEmbedder` (Osysharp.Memory.Testing): a deterministic bag of words, so a test
+// searches with words its messages hold — what it proves is WHICH copy is indexed and WHO finds it, not how well a model
+// reads meaning. The desk (Ada), Cus, Dee and Eve are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Memory.Testing;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void a_message_is_found_through_its_canonical_copy_whatever_it_was_written_in() {
+  TestEmbedder.Use(new WordsEmbedder());
+  runas (Inbox) {
+    ReceiveInbound(new InboundMessage { ChannelKey = "email", Endpoint = "support@desk.test", From = "ana@example.test",
+                                        ExternalId = "<s1@example.test>", Subject = "Vattenkokare",
+                                        Text = "Hej, min vattenkokare är trasig och jag vill ha pengarna tillbaka." });
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    var hits = SearchConversations("vattenkokare trasig pengarna tillbaka");
+    Assert.Equal(1, hits.Count);
+    Assert.Equal("Vattenkokare", hits[0].Subject);
+    // What was found is the CANONICAL copy — the desk's language (the tagging translator marks it "[en]") — never
+    // the original: one corpus, one language, whatever the customer wrote in.
+    Assert.True(hits[0].Passage.StartsWith("[en]"));
+  }
+}
+
+[Test(Desk)]
+void searching_as_the_customer_never_finds_a_note() {
+  TestEmbedder.Use(new WordsEmbedder());
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Refund");
+    UnitOfWork.Commit();
+    Post(c, "Your refund is on its way.");
+    Post(c, "Customer has asked for refunds three times this year — flag the account.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Cus) {
+    var hits = SearchConversations("flag the account refunds");
+    Assert.Equal(0, hits.Count(h => h.Passage.Contains("flag the account")));
+  }
+  // The control: the desk finds it.
+  runas (Ada) { Assert.Equal(1, SearchConversations("flag the account refunds").Count(h => h.Passage.Contains("flag the account"))); }
+}
+
+[Test(Desk)]
+void similar_conversations_are_found_across_channels() {
+  TestEmbedder.Use(new WordsEmbedder());
+  runas (Inbox) {
+    ReceiveInbound(new InboundMessage { ChannelKey = "email", Endpoint = "support@desk.test", From = "bo@example.test",
+                                        ExternalId = "<b1@example.test>", Subject = "Kettle", Text = "My kettle stopped heating." });
+    UnitOfWork.Commit();
+    ReceiveInbound(new InboundMessage { ChannelKey = "sms", Endpoint = "+46700000000", From = "+46701112233",
+                                        ExternalId = "sms-1", Text = "The kettle I bought stopped heating again." });
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    var byMail = Message.Single(m => m.Text == "My kettle stopped heating.").Conversation;
+    var similar = SimilarConversations(byMail);
+    Assert.Equal(1, similar.Count);
+    Assert.True(similar[0].Conversation != byMail.Id);
+  }
+}

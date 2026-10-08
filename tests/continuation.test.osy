@@ -1,0 +1,230 @@
+// Osysharp.Conversations — continuing a conversation somewhere else. A reply written in the chat that the customer has
+// not read after ten minutes is MAILED to them, with everything they have not read and a link that continues the
+// conversation in any browser; their answer to that mail lands in the same conversation. Every test asserts what the
+// carrier was handed (`Carried`, tests/model/app.osy) or what a reader of the conversation now sees.
+//
+// The desk (Ada), Cus, Dee and Eve are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+/// Ana opens the chat from her browser, leaving her address, and asks a question.
+Conversation AnaAsks() {
+  Conversation? c = null;
+  runas (new Visitor { Id = "visit-ana" }) { c = StartConversation("Do you ship to Norway?", "Shipping", "Ana", "ana@example.test"); }
+  return c!;
+}
+
+/// Ada answers in the chat.
+void AdaAnswers(string text) {
+  runas (Ada) {
+    Post(Conversation.Single(x => x.Subject == "Shipping"), text);
+    UnitOfWork.Commit();
+  }
+}
+
+/// The clocks that are due fire — the follow-up, then its delivery. (A test moves the time: `TestClock.Advance`.)
+[SuppressWarning("cost-unbounded-read")]   // a test settles everything its own small world queued
+void ClocksFire() {
+  foreach (var seat in Participant.Where(p => p.Party != null).ToList()) { Workflow.Settle(seat); }
+  foreach (var w in MessageLanguageWork.ToList()) { Workflow.Settle(w); }
+  foreach (var d in MessageDelivery.ToList()) { Workflow.Settle(d); }
+}
+
+/// The text of the link a follow-up carried — what goes in the browser's address bar after the host.
+string LinkIn(Carried mail) {
+  var at = mail.ContinueLink.IndexOf("/conversations/continue/");
+  return mail.ContinueLink.Substring(at + "/conversations/continue/".Length);
+}
+
+[Test(Desk)]
+void an_unread_chat_reply_is_mailed_after_ten_minutes_with_everything_unread() {
+  AnaAsks();
+  AdaAnswers("Yes — to every Nordic country.");
+  AdaAnswers("Delivery to Oslo takes three days.");
+  // Nine minutes: nothing yet — the clock runs from the FIRST unread reply.
+  TestClock.Advance(TimeSpan.FromMinutes(9));
+  runas (Ada) {
+    foreach (var seat in Participant.Where(p => p.Party != null).ToList()) { Workflow.Settle(seat); }
+    Assert.Equal(0, Carried.Count());
+    Assert.Equal(FollowUpState.Pending, Participant.Single(p => p.Party != null).FollowUp);
+  }
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  runas (Ada) {
+    // ONE mail, to the address she left, carrying BOTH replies and a link that continues the chat.
+    var mail = Carried.Single();
+    Assert.Equal("email", mail.Channel);
+    Assert.Equal("ana@example.test", mail.To);
+    Assert.Contains("Yes — to every Nordic country.", mail.Text);
+    Assert.Contains("Delivery to Oslo takes three days.", mail.Text);
+    Assert.Contains("You have 2 replies you have not read yet", mail.Text);
+    Assert.Contains("/conversations/continue/g1.", mail.ContinueLink);
+    Assert.Contains(mail.ContinueLink, mail.Text);
+    // Each reply is recorded as delivered by mail too — so the desk reads both as mailed, and neither goes again.
+    Assert.Equal(2, MessageDelivery.Count(d => d.ChannelKey == "email" && d.State == DeliveryState.Sent));
+    Assert.Equal(FollowUpState.Sent, Participant.Single(p => p.Party != null).FollowUp);
+  }
+  // Another ten minutes: nothing she has not been sent — no second mail.
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  runas (Ada) { Assert.Equal(1, Carried.Count()); }
+}
+
+/// Only a seat a chat reply waits on has a follow-up run (SP-73): the customer's, from the first reply. The desk's own
+/// seat never does, and before anybody answers neither does hers.
+[Test(Desk)]
+void only_the_seat_a_reply_waits_on_starts_a_follow_up() {
+  AnaAsks();
+  runas (Ada) { Post(Conversation.Single(x => x.Subject == "Shipping"), "Noted.", EntryVisibility.Internal); UnitOfWork.Commit(); }
+  runas (Ada) { Assert.Equal(0, Participant.Count(p => p.FollowUpStartedAt != null)); }
+  AdaAnswers("Yes — to every Nordic country.");
+  runas (Ada) {
+    Assert.Equal(1, Participant.Count(p => p.FollowUpStartedAt != null));
+    Assert.NotNull(Participant.Single(p => p.Party != null).FollowUpStartedAt);
+    Assert.Equal(FollowUpState.Pending, Participant.Single(p => p.Party != null).FollowUp);
+    Assert.Equal(0, Participant.Count(p => p.Member != null && p.FollowUpStartedAt != null));
+  }
+}
+
+[Test(Desk)]
+void a_reply_read_in_time_is_not_mailed() {
+  var c = AnaAsks();
+  AdaAnswers("Yes — to every Nordic country.");
+  // Ana is still on the page: the transcript marks it read as it shows it.
+  runas (new Visitor { Id = "visit-ana" }) { MarkConversationRead(c.Id); }
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  runas (Ada) {
+    Assert.Equal(0, Carried.Count());
+    Assert.Equal(0, MessageDelivery.Count());
+    Assert.Equal(FollowUpState.None, Participant.Single(p => p.Party != null).FollowUp);
+  }
+}
+
+[Test(Desk)]
+void replying_to_that_mail_continues_the_chat_conversation() {
+  AnaAsks();
+  AdaAnswers("Yes — to every Nordic country.");
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single().SentId; }
+  // Ana answers the mail from her phone's mail app — quoting the mail's id, as every client does.
+  runas (Inbox) {
+    var r = ReceiveInbound(new InboundMessage {
+      ChannelKey = "email", Endpoint = "support@desk.test", From = "ana@example.test", FromName = "Ana",
+      ExternalId = "<ana-1@example.test>", ThreadKeys = [ours], Subject = "Re: Shipping", Text = "Great — and to Tromsø?",
+    });
+    UnitOfWork.Commit();
+    Assert.True(!r.Started);
+  }
+  runas (Ada) {
+    // The SAME conversation, one person in it, and the desk's next reply goes by mail.
+    Assert.Equal(1, Conversation.Count());
+    var c = Conversation.Single();
+    Assert.Equal(3, ConversationEntry.Count(e => e.Conversation == c));
+    Assert.Equal(1, Participant.Count(p => p.Conversation == c && p.Party != null));
+    Assert.Equal("email", c.ReplyChannel);
+  }
+}
+
+[Test(Desk)]
+void back_in_the_widget_the_whole_thread_shows_mail_included() {
+  var c = AnaAsks();
+  AdaAnswers("Yes — to every Nordic country.");
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single().SentId; }
+  runas (Inbox) {
+    ReceiveInbound(new InboundMessage {
+      ChannelKey = "email", Endpoint = "support@desk.test", From = "ana@example.test", ExternalId = "<ana-1@example.test>",
+      ThreadKeys = [ours], Subject = "Re: Shipping", Text = "Great — and to Tromsø?",
+    });
+    UnitOfWork.Commit();
+  }
+  // Back in her browser: the whole timeline, the mail she wrote among it, each with its channel.
+  runas (new Visitor { Id = "visit-ana" }) {
+    var said = Message.Where(m => m.Conversation.Id == c.Id).OrderBy(m => m.Sequence).ToList();
+    Assert.Equal(3, said.Count);
+    Assert.Equal("web", said[0].ChannelKey);
+    Assert.Equal("web", said[1].ChannelKey);
+    Assert.Equal("email", said[2].ChannelKey);
+    Assert.Equal("Great — and to Tromsø?", said[2].Text);
+  }
+}
+
+[Test(Desk)]
+void the_continue_link_opens_the_conversation_once_and_then_never_again() {
+  var c = AnaAsks();
+  AdaAnswers("Yes — to every Nordic country.");
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  var link = "";
+  runas (Ada) { link = LinkIn(Carried.Single()); }
+  // A browser that never took part reads nothing of it…
+  runas (new Visitor { Id = "visit-phone" }) { Assert.Equal(0, Message.Count(m => m.Conversation.Id == c.Id)); }
+  // …until the link is opened there and she says "continue here".
+  var anaId = Guid.Empty;
+  runas (Ada) { anaId = Participant.Single(p => p.Party != null).Party!.Id; }
+  runas (new Visitor { Id = "visit-phone" }) { Assert.True(!IsParty(anaId)); }
+  runas (new Visitor { Id = "visit-ana" }) { Assert.True(IsParty(anaId)); }
+  runas (new Visitor { Id = "visit-phone" }) { ContinueHere(ConversationContinueLink.From(link)); }
+  runas (Ada) { Assert.Equal(2, ContactPoint.Count(p => p.Kind == ContactPointKind.Visitor)); }
+  runas (new Visitor { Id = "visit-phone" }) {
+    Assert.Equal(1, Conversation.Count());
+    Assert.Equal(2, Message.Count(m => m.Conversation.Id == c.Id));
+    // …and it is hers to write in, as herself.
+    ReplyAsCustomer(c.Id, "Thanks — writing from my phone now.");
+  }
+  // Used once, the link opens nothing more — a forwarded copy of the mail is worthless.
+  runas (new Visitor { Id = "visit-forwarded" }) {
+    Assert.Throws(() => { ContinueHere(ConversationContinueLink.From(link)); });
+    Assert.Equal(0, Message.Count(m => m.Conversation.Id == c.Id));
+  }
+  runas (Ada) {
+    var last = Message.Where(m => m.Conversation == c).OrderByDescending(m => m.Sequence).First();
+    Assert.Equal("Thanks — writing from my phone now.", last.Text);
+    Assert.Equal("Ana", last.ByName);
+  }
+}
+
+[Test(Desk)]
+void a_continue_link_makes_a_browser_nobody_but_the_party_it_was_mailed_to() {
+  var c = AnaAsks();
+  runas (new Visitor { Id = "visit-bo" }) { StartConversation("Is the store open on Sunday?", "Sunday", "Bo", "bo@example.test"); }
+  AdaAnswers("Yes — to every Nordic country.");
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  var link = "";
+  runas (Ada) { link = LinkIn(Carried.Single()); }
+  // Bo opens Ana's link in his own browser: it makes his browser ANA's too — never makes Ana's conversation his.
+  runas (new Visitor { Id = "visit-bo" }) { ContinueHere(ConversationContinueLink.From(link)); }
+  runas (Ada) {
+    var bo = Participant.Single(p => p.Conversation.Subject == "Sunday" && p.Party != null).Party!;
+    Assert.Equal(1, Participant.Count(p => p.Conversation == c && p.Party != null));
+    Assert.Equal(0, Participant.Count(p => p.Conversation == c && p.Party == bo));
+  }
+}
+
+[Test(Desk)]
+void a_later_follow_up_carries_only_the_replies_the_first_did_not() {
+  AnaAsks();
+  AdaAnswers("Yes — to every Nordic country.");
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  // She still has not opened anything; the desk adds one more reply, and ten minutes later a SECOND mail goes —
+  // with that reply alone, never the one she was already sent.
+  AdaAnswers("Delivery to Oslo takes three days.");
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) { ClocksFire(); }
+  runas (Ada) {
+    Assert.Equal(2, Carried.Count());
+    var second = Carried.Single(x => x.Text.Contains("Oslo"));
+    Assert.Contains("You have a reply you have not read yet", second.Text);
+    Assert.True(!second.Text.Contains("every Nordic country"));
+  }
+}
+

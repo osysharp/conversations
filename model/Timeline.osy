@@ -1,0 +1,226 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Memory;
+using Osysharp.Storage;
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum MessageDirection {
+  /// From the customer (or anyone outside) to the team.
+  [Label("Received")] Inbound,
+  /// From the team (a person or an AI) to the customer.
+  [Label("Sent")] Outbound,
+  /// Inside the team — a note.
+  [Label("Note")] Internal,
+}
+
+/// Where a text came from — the original as written, a machine's translation, or a person's.
+public enum TextSource {
+  [Label("Original")] Original,
+  [Label("Machine translation")] Machine,
+  [Label("Human translation")] Human,
+}
+
+/// The one place on a conversation's timeline — `Sequence` is shared by every kind of entry, so a message, a note and
+/// an event written at once take consecutive places.
+Counter EntrySequence = new() { Start = 0 };
+
+/// One entry on a conversation's timeline: a `Message`, or a `ConversationEvent` — or another kit's own kind of entry,
+/// derived from this. ONE table, ONE order, ONE rule.
+///
+/// ⚑ THE APP STATES ITS STAFF'S ACCESS, on the kinds it reads: `partial entity Message { security { allow read, create
+///   when IsConversationStaff; } }` (and on `ConversationEvent`). Grants are never inherited; the DENIES below are the
+///   floor every kind stands on, the app's own kinds included.
+[Authority(Extensible)]
+public entity ConversationEntry {
+  [Required] Conversation Conversation;
+  /// Its place on the timeline, assigned by the platform when it is written — gap-free per conversation.
+  [Counter(EntrySequence, scope = Conversation)] int Sequence;
+  [Required] DateTime At;
+  /// Who may see it — fixed when written, for everyone.
+  [Required] EntryVisibility Visibility;
+  /// Who caused it — at most one of the three — and the name shown for them, as it was at the time.
+  Party? ByParty;
+  Principal? ByMember;
+  [MaxLength(200)] string? ByAgent;
+  [Classification(Personal.Identity), MaxLength(200)] string ByName = "";
+
+  security {
+    // A customer reads the customer-visible entries of the conversations they are in.
+    allow read when IsConversationCustomer
+      where Visibility == EntryVisibility.Customer && IsCustomerIn(Conversation.Id);
+
+    // SECURITY-INVARIANT(conversation-internal-stays-internal): a caller who is not staff never reads an internal or
+    // AI-internal entry — whatever path reaches it (a list, an include, another kit's function, a base read through
+    // ConversationEntry), and whatever grant an app writes. Guarded by tests/security.test.osy
+    // (a_customer_reads_the_replies_but_never_the_notes, a_visitor_reads_the_replies_but_never_the_notes).
+    deny read when !IsConversationStaff where Visibility != EntryVisibility.Customer;
+    // SECURITY-INVARIANT(customer-cannot-forge-internal-entries): nor writes one — no forged note, no fake draft.
+    // Guarded by tests/security.test.osy (a_customer_cannot_write_a_note_or_an_event).
+    deny create when !IsConversationStaff where Visibility != EntryVisibility.Customer;
+    // SECURITY-INVARIANT(an-entry-is-signed-by-its-writer): an entry made by a member is made by THAT member — nobody,
+    // staff included, writes one in a colleague's name. Every kit path stamps the caller (`Post`, `Record`); this is
+    // what makes a row written another way honest too. Guarded by tests/security.test.osy
+    // (a_member_cannot_write_in_a_colleagues_name) and demo/chat-room.
+    deny create where ByMember != null && ByMember != user;
+    // SECURITY-INVARIANT(entry-visibility-is-immutable): an entry's visibility never changes, for ANYONE — staff
+    // included — so no update can ever expose a note. Guarded by tests/security.test.osy
+    // (an_internal_note_can_never_be_made_visible_even_by_staff).
+    deny update Visibility;
+    // The timeline's history is fixed: which conversation, which place, who wrote it, when.
+    deny update Conversation;
+    deny update At;
+    deny update ByParty;
+    deny update ByMember;
+    deny update ByAgent;
+    deny update ByName when !IsConversationStaff;
+  }
+}
+
+/// Something someone SAID — on a channel, in a direction, with its text.
+[Unique(ChannelKey, ExternalId)]
+[SuppressWarning("UNIQUE_SPANS_HIERARCHY")]   // both columns are Message's own: an event holds null in them, and nulls never collide
+[Authority(Extensible)]
+public entity Message : ConversationEntry {
+  [Required] MessageDirection Direction;
+  /// The channel it travelled on ("web", "email", "sms") and our endpoint on it ("portal", support@acme.com, +46…).
+  [Required, MaxLength(40)] string ChannelKey;
+  [MaxLength(255)] string? Endpoint;
+  /// THE ORIGINAL, as written or received (after at-rest scrubbing only).
+  [Required, Classification(Personal.Content)] string Text;
+  /// How `Text` is shown: plain (everything a customer or a channel sends), or markdown — what the desk's composer writes
+  /// (0.11.0). Only the team writes markdown: a customer's message is never rendered, so a link in it is never dressed
+  /// in words it chose.
+  TextFormat Format = TextFormat.Plain;
+  /// The language it is written in, once detected.
+  [MaxLength(35)] string? Language;
+  /// The copy in the desk's language (`CanonicalLanguage`), REDACTED — what search, memory and analysis read. The
+  /// original when it was already in that language (or no translator is set up), a translation when not. In the app's
+  /// shared corpus, so one search finds a conversation by meaning whatever language it was held in — and only through
+  /// a message the searcher may read, so a customer's search never surfaces a note.
+  [Searchable(Memory), Classification(Personal.Content)] string? CanonicalText;
+  TextSource CanonicalSource = TextSource.Original;
+  /// A customer was sent it in another language (`MessageText`, `WasDelivered`) — what tells a page to ask which.
+  bool Rendered;
+  /// The id it ARRIVED under on its channel — a second delivery of the same id is the same message.
+  [MaxLength(255)] string? ExternalId;
+  /// Everyone else an inbound message was addressed to (comma-separated) — who was in the thread, for the join check.
+  [Classification(Personal.Contact), MaxLength(2000)] string? AlsoTo;
+  /// What the sender's mail client QUOTED under what they wrote — the earlier messages, a signature. Kept, and shown on
+  /// request ("Show quoted text"); `Text` is what they said this time. Null when nothing was quoted (0.8.0).
+  [Classification(Personal.Content)] string? QuotedText;
+  /// The whole message as it ARRIVED (a received mail's .eml), when its channel keeps one — readable exactly where the
+  /// message is, so nothing the customer sent is ever lost to the split above (0.8.0).
+  [Attachment] FileAsset? Original;
+  /// The files it carries (0.8.0).
+  [ForeignKey(Message)] MessageAttachment[] Attachments;
+  /// The message it answers, when known.
+  Message? InReplyTo;
+  /// The AI-internal draft this customer-visible message was approved from.
+  Message? ApprovedFrom;
+  [ForeignKey(Message)] MessageText[] Renderings;
+
+  security {
+    allow read when IsConversationCustomer
+      where Visibility == EntryVisibility.Customer && IsCustomerIn(Conversation.Id);
+    // A customer writes in their own conversation — inbound, customer-visible, on the web, AS THEMSELVES — and PLAIN.
+    // SECURITY-INVARIANT(customer-text-is-never-rendered): only the team writes markdown, so a link in a customer's
+    // message is never dressed in words they chose. Guarded by tests/security.test.osy
+    // (a_customer_cannot_write_a_message_the_desk_renders_as_markdown).
+    allow create when IsConversationCustomer
+      where Direction == MessageDirection.Inbound && Visibility == EntryVisibility.Customer && ChannelKey == "web"
+         && IsCustomerIn(Conversation.Id)
+         && ByMember == null && ByAgent == null && Format == TextFormat.Plain
+         && IsParty(ByParty.Id);
+
+    // SECURITY-INVARIANT(customer-cannot-forge-internal-entries): a customer never writes as the desk — an outbound
+    // message, or one in another channel's name. Guarded by tests/security.test.osy
+    // (a_customer_cannot_post_a_message_as_the_desk).
+    deny create when !IsConversationStaff where Direction != MessageDirection.Inbound;
+    // The record of what was said: only staff redact; nobody re-labels it.
+    deny update Text when !IsConversationStaff;
+    deny update QuotedText when !IsConversationStaff;
+    deny update Original;
+    deny update CanonicalText when !IsConversationStaff;
+    deny update CanonicalSource;
+    deny update Rendered when !IsConversationStaff;
+    deny update Direction;
+    deny update Format;
+    deny update ChannelKey;
+    deny update ExternalId;
+    deny update AlsoTo;
+    deny update ApprovedFrom;
+  }
+}
+
+/// Something that HAPPENED on the conversation — an assignment, a status change, an SLA breach, an approval. Written by
+/// other kits and the app through `Record`, or as a kind of their own derived from this when it needs typed columns.
+///
+/// ⚑ IT HOLDS THE FACTS, NEVER THE SENTENCE (D-RTL2 Q2). What happened — its `Kind` and the facts below, as they were at
+///   the time — is stored; the words are said when it is READ, in the reader's language, by `ConversationCopy
+///   .EventSentence`. So an Arabic desk reads its history in Arabic and a Swedish one in Swedish, from the same row. A
+///   kind with facts of its own keeps them in `Facts` as its own class (`JsonSerializer.Serialize(new TicketFacts {…})`)
+///   and says them in its `EventSentence` override (`JsonSerializer.Deserialize<TicketFacts>(e.Facts)`). It is always
+///   written through `Record` — the kit's own code — because a customer, or a timer, drives bodies that write the
+///   timeline, and the floor below lets only the kit write past it.
+[Authority(Extensible)]
+public entity ConversationEvent : ConversationEntry {
+  /// "<source>.<what>" — "inbox.assigned", "sla.first-reply-breached", "agents.draft-approved".
+  [Required, MaxLength(120)] string Kind;
+  /// The kit or app that wrote it — "Osysharp.Inbox".
+  [Required, MaxLength(60)] string Source;
+  /// Who it is about, as named at the time — the customer merged, the colleague it was handed to — and, when it is a
+  /// party, which: erasing who they are reaches the name here too.
+  [Classification(Personal.Identity), MaxLength(200)] string Person = "";
+  Party? PersonParty;
+  /// The second person it names — the party a customer was merged into.
+  [Classification(Personal.Identity), MaxLength(200)] string OtherPerson = "";
+  Party? OtherParty;
+  /// Somebody's own words about it — the reason given for an erasure, a merge, a closing.
+  [Classification(Personal.Content), MaxLength(1000)] string Detail = "";
+  /// A number it names — how many messages an erasure blanked.
+  int? Count;
+  /// Why an erasure ran, on the kit's own erasure lines.
+  ErasureCause? Cause;
+  /// The facts of a kind another kit or the app defines, as its own class, serialized — "inbox.assigned" keeps the
+  /// inbox's `InboxEvent`, "helpdesk.field" the desk's own. Personal, because what they hold can be: erased with the
+  /// conversation's words. A name that erasing who someone is must reach goes in `Person`, never only in here.
+  [Classification(Personal.Content)] Json? Facts;
+  /// Its words were erased with the conversation's: it keeps its place and kind, and reads as erased.
+  bool Erased;
+  /// The side conversation it is about — a side conversation started beside this one, or somebody answering in it.
+  Conversation? Side;
+
+  security {
+    allow read when IsConversationCustomer
+      where Visibility == EntryVisibility.Customer && IsCustomerIn(Conversation.Id);
+    // A customer never writes the timeline's facts, nor changes or removes one.
+    deny create when !IsConversationStaff;
+    deny update when !IsConversationStaff;
+    deny delete when !IsConversationStaff;
+  }
+}
+
+/// A message in ANOTHER language — what the customer was sent in theirs, or a reading for an agent. As internal as its
+/// message: it is readable exactly where the message is.
+[Unique(Message, Language)]
+[Authority(Extensible)]
+public entity MessageText {
+  [Required] Message Message;
+  [Required, MaxLength(35)] string Language;
+  [Required, Classification(Personal.Content)] string Text;
+  [Required] TextSource Source;
+  /// The provider and model, for a machine translation.
+  [MaxLength(120)] string? Engine;
+  /// THIS is the text the customer actually received — the legal record.
+  bool WasDelivered;
+
+  security {
+    allow read when IsConversationCustomer
+      where Message.Visibility == EntryVisibility.Customer && IsCustomerIn(Message.Conversation.Id);
+    // A rendering of a note is as internal as the note.
+    deny read when !IsConversationStaff where Message.Visibility != EntryVisibility.Customer;
+    deny create when !IsConversationStaff;
+    deny update Message;
+  }
+}

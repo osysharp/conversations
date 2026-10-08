@@ -1,0 +1,252 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+// ── proving an address ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A contact point is a CLAIM until something we SENT to it comes back: a code mailed (or texted) to it, typed in by the
+// person claiming it. That proof is the only thing that writes `ContactPoint.VerifiedKey` here — never an agent's
+// "confirmed on the phone" (`AssertedBy`), never a mail received FROM the address (a From header can be forged).
+//
+// ⚑ THE PROOF MAKES THE PERSON THE SAME. A chat visitor who proves an address the desk already knows — a customer who has
+//   mailed before, or one whose address is proven already — IS that customer: their visit's party is merged into the
+//   one holding the address (`PartyMerge`, automatic), and their browser reads that history from then on. Before the
+//   proof, the address typed in the widget is a claim on the visitor's OWN party and reaches nobody else's history.
+//
+// ⚑ THE CODE IS THE WORKFLOW'S. It is made, fingerprinted and sent by `AddressProof` after the commit that asked for it,
+//   and compared there: the row a browser makes holds no code, and nobody — staff included — reads the fingerprint.
+//   Fifteen minutes, five tries, a newer check spends the older: the shape of `Osysharp.Accounts`' one-time codes
+//   (D-SIGNUPPROOF1), for a party rather than an account.
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum ProofState {
+  [Label("Sending")] Sending,
+  [Label("Waiting for the code")] Waiting,
+  [Label("Proven")] Proven,
+  [Label("Not proven")] Lapsed,
+  [Label("Not sent")] Held,
+}
+
+/// A code sent to a contact point, so whoever reads it there can prove the point is theirs.
+[Authority(Extensible)]
+public entity PointCheck {
+  [Required] ContactPoint Point;
+  /// The browser that asked — its own visit, stamped when the row is made.
+  [MaxLength(64)] string? Visit = Visitor.Id;
+  /// The code's keyed fingerprint and its nonce — the workflow's alone; nobody reads them.
+  [MaxLength(128)] string? CodeHash;
+  [MaxLength(48)] string? Nonce;
+  DateTime? ExpiresAt;
+  int Misses;
+  /// Why it was not sent, or why it stopped.
+  [MaxLength(500)] string? Problem;
+  ProofState State;                                       // no default — AddressProof owns it
+
+  security {
+    // A customer asks to prove a point of their OWN party, and sees how it went.
+    allow create when IsConversationCustomer where IsParty(Point.Party.Id);
+    allow read when IsConversationCustomer where IsParty(Point.Party.Id);
+    // SECURITY-INVARIANT(verification-is-proof-not-assertion): the code is made, kept and compared by the workflow.
+    // Nobody reads its fingerprint, nobody writes it, nobody moves a check along by hand.
+    deny read CodeHash;
+    deny read Nonce;
+    deny create where CodeHash != null || Nonce != null || ExpiresAt != null || Misses != 0;
+    deny create when !IsConversationStaff where Visit != Visitor.Id;
+    deny update;
+    deny delete;
+  }
+}
+
+/// Mails (or texts) the code after the commit that asked for it, then waits for it to be typed in.
+public workflow AddressProof {
+  Tracks    = PointCheck.State;
+  Autostart = true;
+  Initial   = Sending;
+
+  /// Someone typed a code. Raised by `ProveAddress` — code, never a browser — and harmless however often: a wrong code
+  /// counts against the check (five and it is dead), and only the right one does anything.
+  event Prove(string code);
+
+  state Sending {
+    enter {
+      var channel = ChannelReaching(this.Item.Point.Kind);
+      if (channel == null) {
+        this.Item.Problem = $"There is no channel that reaches a {this.Item.Point.Kind} — a code cannot be sent.";
+        goto Held;
+      }
+      if (!channel!.IsReady()) {
+        this.Item.Problem = channel!.NotReadyReason();
+        goto Held;
+      }
+    }
+    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    on Expire {
+      var check = this.Item;
+      var now = DateTime.UtcNow;
+      var code = NewProofCode();
+      var nonce = Security.RandomId(24);
+      check.Nonce = nonce;
+      check.CodeHash = ProofFingerprint(nonce, code);
+      check.ExpiresAt = now + TimeSpan.FromMinutes(15);
+      var copy = App.Setting<ConversationsSetup>().Copy;
+      ChannelReaching(check.Point.Kind)!.Send(new OutboundMessage {
+        To = check.Point.Value, Subject = copy.CodeSubject(), Text = copy.CodeText(code),
+      }, "proof-" + check.Id.ToString());
+      goto Waiting;
+    }
+  }
+
+  state Waiting {
+    Expire { Within = TimeSpan.FromMinutes(15); Accrues = false; }
+    on Expire { goto Lapsed; }
+    on Prove(string code) {
+      var check = this.Item;
+      var right = check.ExpiresAt != null && check.ExpiresAt > DateTime.UtcNow && check.Nonce != null
+        && check.CodeHash == ProofFingerprint(check.Nonce!, code);
+      if (right) {
+        ProvePoint(check.Point, VerificationMethod.Code);
+        goto Proven;
+      }
+      check.Misses = check.Misses + 1;
+      if (check.Misses >= 5 || check.ExpiresAt == null || check.ExpiresAt <= DateTime.UtcNow) {
+        check.Problem = "That code no longer works — ask for a new one.";
+        goto Lapsed;
+      }
+    }
+  }
+
+  terminal success Proven { }
+  terminal cancel Lapsed { }
+  terminal cancel Held { }
+}
+
+/// A configured channel that reaches `kind` (email → the email channel, a phone → the SMS one), or null.
+public IConversationChannel? ChannelReaching(ContactPointKind kind) {
+  foreach (var channel in App.Setting<ConversationsSetup>().Channels) {
+    if (channel.Reaches == kind) { return channel; }
+  }
+  return null;
+}
+
+/// Six digits.
+string NewProofCode() {
+  var code = "";
+  while (code.Length < 6) {
+    var hex = Security.RandomHex(16);
+    for (var i = 0; i < hex.Length && code.Length < 6; i++) {
+      var c = hex.Substring(i, 1);
+      if ("0123456789".IndexOf(c) >= 0) { code = code + c; }
+    }
+  }
+  return code;
+}
+
+/// A code as it is compared — digits only ("123 456", "123-456") — keyed, with the check's own nonce.
+string ProofFingerprint(string nonce, string code) {
+  return Security.Fingerprint("conversations-point-proof:" + nonce + ":" + code.Replace(" ", "").Replace("-", "").Trim());
+}
+
+/// `point` is proven. If the address already belongs to another party — proven there, or claimed by one the desk has
+/// been talking to — the person IS that party: theirs is merged into it, and the point there is the one marked proven.
+/// Otherwise this point is. Runs as the system, from the proof flows only.
+void ProvePoint(ContactPoint point, VerificationMethod method) {
+  var now = DateTime.UtcNow;
+  var key = $"{point.Kind}:{point.Value}";
+  var mine = Survivor(point.Party);
+  // Who else holds it: the party holding it PROVEN — whoever proved it before was this mailbox too — or else the newest
+  // party merely CLAIMING it, provided that party opens no portal: a claim is not proof the claimant owns the address,
+  // and a signed-in account's history is never handed to a mailbox it did not prove.
+  Party? holder = null;
+  var proven = ContactPoint.FirstOrDefault(p => p.VerifiedKey == key);
+  if (proven != null) {
+    holder = Survivor(proven.Party);
+  } else {
+    var claim = ContactPoint.Where(p => p.Kind == point.Kind && p.Value == point.Value && p.Party != point.Party
+        && p.Party.MergedInto == null && p.Party.Account == null)
+      .OrderByDescending(p => p.CreatedAt).FirstOrDefault();
+    holder = claim == null ? null : claim.Party;
+  }
+  if (holder != null && holder.Id != mine.Id) {
+    // Automatic: a proof made it — its timeline line says so in the reader's words ("…proved the same address").
+    new PartyMerge { Kept = holder!, Absorbed = mine, Automatic = true, At = now };
+    var theirs = ContactPoint.FirstOrDefault(p => p.Party == holder && p.Kind == point.Kind && p.Value == point.Value);
+    if (theirs != null && theirs.VerifiedKey == null) {
+      theirs.VerifiedKey = key; theirs.VerifiedAt = now; theirs.VerifiedBy = method;
+    }
+    return;
+  }
+  if (point.VerifiedKey == null) {
+    point.VerifiedKey = key; point.VerifiedAt = now; point.VerifiedBy = method;
+  }
+}
+
+// ── the customer's side: "email me a code" ────────────────────────────────────────────────────────────────────────
+
+/// Send a code to `address`, a claim on the caller's own party (made if it is not there yet) — so they can prove it and
+/// see the conversations that address had with the desk. Answers "" or the sentence to show. The same answer whether or
+/// not the address is known: a stranger learns nothing from it.
+[AllowAnonymous]
+public string SendAddressCode(string address) {
+  var email = address.Trim().ToLower();
+  if (!email.Contains("@") || email.Contains(" ") || email.Length > 254) {
+    return "That does not look like an email address.";
+  }
+  if (ChannelReaching(ContactPointKind.Email) == null) { return "We cannot send codes by mail here."; }
+  var party = VisitorParty("");
+  ClaimAddress(party, email);
+  UnitOfWork.Commit();
+  var point = ContactPoint.Single(p => p.Party == party && p.Kind == ContactPointKind.Email && p.Value == email);
+  // Once a minute per address, five an hour per party — nobody runs up a stranger's inbox from the page.
+  var now = DateTime.UtcNow;
+  var aMinuteAgo = now - TimeSpan.FromMinutes(1);
+  var anHourAgo = now - TimeSpan.FromHours(1);
+  if (PointCheck.Any(c => c.Point == point && c.CreatedAt > aMinuteAgo)) { return ""; }
+  if (PointCheck.Count(c => c.Point.Party == party && c.CreatedAt > anHourAgo) >= 5) { return ""; }
+  new PointCheck { Point = point };
+  UnitOfWork.Commit();
+  return "";
+}
+
+/// The code from that mail, typed in. Answers "" when it proved the address — and the caller's browser then reads that
+/// address's conversations — or the sentence to show.
+[AllowAnonymous]
+public string ProveAddress(string address, string code) {
+  var email = address.Trim().ToLower();
+  var check = PointCheck.Where(c => c.Point.Kind == ContactPointKind.Email && c.Point.Value == email
+      && c.State == ProofState.Waiting).OrderByDescending(c => c.CreatedAt).FirstOrDefault();
+  if (check == null) { return "That code no longer works — ask for a new one."; }
+  AddressProof.RaiseProve(check, code);
+  UnitOfWork.Commit();
+  var after = PointCheck.FirstOrDefault(c => c.Id == check.Id);
+  if (after != null && after.State == ProofState.Proven) { return ""; }
+  return after != null && after.State == ProofState.Lapsed ? "That code no longer works — ask for a new one."
+       : "That is not the code we sent — check it and try again.";
+}
+
+// ── a signed-in account ───────────────────────────────────────────────────────────────────────────────────────────
+
+/// Link the party whose address an account just proved by signing in. Call it from your sign-in hook — it runs as the
+/// sign-in flow, the one caller that may write `Party.Account`:
+///   `public class DeskEvents : AccountEvents {
+///      public override void SignedIn(User account, DateTime at) { LinkSignedInAccount(account, account.Email, account.EmailVerifiedAt != null); } }`
+/// An account whose address is not proven links nothing. The party holding that address PROVEN is linked; if none
+/// does, the account gets a party of its own with the address proven (a claim elsewhere is never enough: it would hand
+/// whoever typed that address their history, or them yours).
+public void LinkSignedInAccount(Principal account, string email, bool emailIsProven) {
+  if (!emailIsProven) { return; }
+  var address = email.Trim().ToLower();
+  if (Party.Any(p => p.Account == account)) { return; }
+  var key = $"{ContactPointKind.Email}:{address}";
+  var proven = ContactPoint.FirstOrDefault(p => p.VerifiedKey == key);
+  if (proven != null) {
+    var party = Survivor(proven.Party);
+    if (party.Account == null) { party.Account = account; }
+    return;
+  }
+  var made = App.Setting<ConversationsSetup>().Parties.New(ContactPointKind.Email, address, account.DisplayName);
+  made.CreatedByVisit = null;
+  made.Account = account;
+  new ContactPoint { Party = made, Kind = ContactPointKind.Email, Value = address, IsPreferred = true,
+                     VerifiedKey = key, VerifiedAt = DateTime.UtcNow, VerifiedBy = VerificationMethod.SignIn };
+}

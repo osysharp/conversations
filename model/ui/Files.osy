@@ -1,0 +1,193 @@
+// FILES AND CODE ON THE TIMELINE (0.9.0) — what a message carries, shown where it is read: pictures in the message,
+// opened large on a click; a code or text file with its first lines coloured and numbered; a ZIP's listing; and every
+// file a download under its own name. A pasted ``` snippet is shown as code, and what a mail client quoted is one
+// click away. Each a `[Composable]`, used by the thread and the transcript and free for an app's own pages.
+//
+// ⚑ NOTHING IS RENDERED THAT COULD RUN. A picture is shown only when its BYTES are a picture (`WhatIs`); HTML and SVG are
+//   code here, shown as their source; and a download is always `Content-Disposition: attachment` (the platform's
+//   a-download-is-never-a-document) — `Link(fileAsset:)` asks for nothing else.
+
+namespace Osysharp.Conversations;
+
+using Osysharp.Ui;
+using Osysharp.Storage;
+
+/// The files of `messageId` among `files` (a thread's one read of them), in the order they were attached.
+public List<MessageAttachment> FilesFor(List<MessageAttachment> files, Guid messageId) {
+  List<MessageAttachment> mine = [];
+  foreach (var f in files) { if (f.Message.Id == messageId) { mine.Add(f); } }
+  return mine;
+}
+
+/// Code with line numbers, coloured — a file's preview, or a pasted snippet. Scrolls sideways rather than wrapping, so
+/// a line reads as the writer laid it out.
+[Composable]
+public component CodeView(List<CodeLine> lines, string label = "Code", bool truncated = false, int totalLines = 0) {
+  render {
+    Stack(gap: 0, w: "100%", maxH: "28rem", overflowY: Overflow.Auto, overflowX: Overflow.Auto, py: 2,
+          rounded: Radius.Md, borderW: 1, border: Colors.Border, bg: Colors.Bg, label: label) {
+      foreach (var line in lines) {
+        Row(gap: 3, align: Align.Start, px: 2, minW: "max-content") {
+          Text(line.Number.ToString(), color: Colors.TextMuted, fontFamily: Font.Mono, fontSize: FontSize.Caption,
+               minW: "2.5rem", textAlign: TextAlign.End, shrink: 0, userSelect: UserSelect.None, decorative: true);
+          Text(fontFamily: Font.Mono, fontSize: FontSize.Caption, whiteSpace: WhiteSpace.Pre, color: Colors.OnSurface,
+               label: line.Text) {
+            foreach (var t in line.Tokens) {
+              Text(t.Text,
+                   color: t.Kind == CodeTokenKind.Keyword ? Colors.Primary
+                        : t.Kind == CodeTokenKind.String ? Colors.Success
+                        : t.Kind == CodeTokenKind.Number ? Colors.Danger
+                        : t.Kind == CodeTokenKind.Comment ? Colors.TextMuted
+                        : t.Kind == CodeTokenKind.Type ? Colors.Warning : Colors.OnSurface,
+                   fontStyle: t.Kind == CodeTokenKind.Comment ? FontStyle.Italic : FontStyle.Normal);
+            }
+          }
+        }
+      }
+      if (truncated) {
+        Text($"Showing the first {lines.Count} of {totalLines} lines — download the file for the rest.",
+             color: Colors.TextMuted, fontSize: FontSize.Caption, px: 2, pt: 2);
+      }
+    }
+  }
+}
+
+/// A message's words: prose as written, a fenced ``` snippet as code, and — when a mail client quoted earlier messages
+/// under it — "Show quoted text". When unsure, everything: the quoted part is never thrown away, only folded.
+[Composable]
+public component MessageBody(string text, string? quoted = null) {
+  List<BodySegment> segments = [];
+  bool fenced = false;
+  bool showQuoted = false;
+  on mount {
+    if (text.Contains("```")) { segments = BodyOf(text); fenced = true; }
+  }
+  action ToggleQuoted() { showQuoted = !showQuoted; }
+  render {
+    Stack(gap: 2, w: "100%", minW: "0") {
+      if (!fenced) {
+        Text(text, whiteSpace: "pre-wrap", lineHeight: "1.55");
+      } else {
+        foreach (var segment in segments) {
+          if (segment.Code) {
+            CodeView(segment.Lines, label: segment.Language != "" ? "Code (" + segment.Language + ")" : "Code");
+          } else {
+            Text(segment.Text, whiteSpace: "pre-wrap", lineHeight: "1.55");
+          }
+        }
+      }
+      if (quoted != null && quoted.Trim() != "") {
+        Row {
+          Button(showQuoted ? "Hide quoted text" : "Show quoted text", onPress: ToggleQuoted, tone: Tone.Ghost, size: Size.Sm);
+        }
+        if (showQuoted) {
+          Text(quoted, whiteSpace: "pre-wrap", color: Colors.TextMuted, fontSize: FontSize.Caption, pl: 3,
+               borderLW: 2, border: Colors.Border);
+        }
+      }
+    }
+  }
+}
+
+/// The files on one message: its pictures in a row (each opens large on a click, with its download), then a card per
+/// other file — a code or text file previewed, a ZIP listed, anything else a download.
+[Composable]
+public component MessageFiles(List<MessageAttachment> files) {
+  Guid opened = Guid.Empty;
+  string openedName = "";
+  action Open(Guid id, string name) { opened = id; openedName = name; }
+  action Close() { opened = Guid.Empty; }
+  render {
+    Stack(gap: 2, w: "100%", label: "Attachments") {
+      Row(gap: 2, wrap: Wrapping.Wrap) {
+        foreach (var picture in files.Where(f => f.Kind == AttachmentKind.Image)) {
+          Stack(gap: 1, maxW: "100%") {
+            Pressable(onClick: () => Open(picture.File.Id, picture.FileName), label: "Open " + picture.FileName,
+                      rounded: Radius.Md, borderW: 1, border: Colors.Border, bg: Colors.Bg, p: 0, cursor: Cursor.Pointer) {
+              Image(fileAsset: picture.File.Id, alt: picture.FileName, maxH: "220px", maxW: "100%", rounded: Radius.Md,
+                    objectFit: ObjectFit.Contain);
+            }
+            Text(picture.FileName, color: Colors.TextMuted, fontSize: FontSize.Caption, maxW: "18rem",
+                 overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, whiteSpace: WhiteSpace.Nowrap);
+          }
+        }
+      }
+      foreach (var file in files.Where(f => f.Kind != AttachmentKind.Image)) {
+        AttachmentCard(file);
+      }
+      if (opened != Guid.Empty) {
+        Dialog(openedName, onDismiss: Close) {
+          Stack(gap: 3, align: Align.Center) {
+            Image(fileAsset: opened, alt: openedName, maxW: "100%", maxH: "75vh", objectFit: ObjectFit.Contain);
+            Link(fileAsset: opened, color: Colors.Primary, fontWeight: FontWeight.Semibold, fontSize: FontSize.Label) {
+              Text("Download " + openedName);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// One non-picture file: its name, what it is and how big, a download — and for code, text or a ZIP, what is inside.
+[Composable]
+public component AttachmentCard(MessageAttachment file) {
+  AttachmentPreview preview = new AttachmentPreview();
+  bool shown = false;
+  on mount {
+    if (file.Kind == AttachmentKind.Code || file.Kind == AttachmentKind.Text || file.Kind == AttachmentKind.Archive) {
+      preview = PreviewOf(file.Id);
+      shown = true;
+    }
+  }
+  render {
+    Stack(gap: 2, w: "100%", p: 2, rounded: Radius.Md, borderW: 1, border: Colors.Border, bg: Colors.Surface,
+          label: "File " + file.FileName) {
+      Row(gap: 2, align: Align.Center, minW: "0") {
+        Badge(file.Kind == AttachmentKind.Code && file.Language != "" ? file.Language : file.Kind.ToString(), tone: Tone.Ghost);
+        Text(file.FileName, fontWeight: FontWeight.Semibold, fontSize: FontSize.Label, minW: "0",
+             overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, whiteSpace: WhiteSpace.Nowrap);
+        Text(Megabytes(file.Size), color: Colors.TextMuted, fontSize: FontSize.Caption, whiteSpace: WhiteSpace.Nowrap);
+        Spacer();
+        Link(fileAsset: file.File.Id, color: Colors.Primary, fontWeight: FontWeight.Semibold, fontSize: FontSize.Caption,
+             whiteSpace: WhiteSpace.Nowrap, label: "Download " + file.FileName) { Text("Download"); }
+      }
+      if (shown && preview.Lines.Count > 0) {
+        CodeView(preview.Lines, label: file.FileName, truncated: preview.Truncated, totalLines: preview.TotalLines);
+      }
+      if (shown && file.Kind == AttachmentKind.Archive) {
+        if (preview.Entries.Count == 0) {
+          Text("This archive could not be read — download it to open it.", color: Colors.TextMuted, fontSize: FontSize.Caption);
+        } else {
+          Stack(gap: 0, maxH: "14rem", overflowY: Overflow.Auto, px: 2, label: "Contents of " + file.FileName) {
+            foreach (var entry in preview.Entries) {
+              Text(entry, fontFamily: Font.Mono, fontSize: FontSize.Caption,
+                   color: entry.EndsWith("/") ? Colors.TextMuted : Colors.OnSurface);
+            }
+            if (preview.MoreEntries > 0) {
+              Text($"…and {preview.MoreEntries} more", color: Colors.TextMuted, fontSize: FontSize.Caption);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The files waiting to go with a composer's next message — each named, with a way to take it back out.
+[Composable]
+public component PendingFiles(List<PendingFile> files, Action<Guid> onRemove) {
+  render {
+    Row(gap: 2, wrap: Wrapping.Wrap, label: "Files to send") {
+      foreach (var f in files) {
+        Row(gap: 1, align: Align.Center, px: 2, py: 1, rounded: Radius.Pill, borderW: 1, border: Colors.Border,
+            bg: Colors.Surface) {
+          Text(f.Name, fontSize: FontSize.Caption, maxW: "14rem", overflow: Overflow.Hidden,
+               textOverflow: TextOverflow.Ellipsis, whiteSpace: WhiteSpace.Nowrap);
+          Text(Megabytes(f.Size), color: Colors.TextMuted, fontSize: FontSize.Caption);
+          Button("Remove", onPress: () => onRemove(f.Id), tone: Tone.Ghost, size: Size.Sm);
+        }
+      }
+    }
+  }
+}

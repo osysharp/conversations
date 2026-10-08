@@ -1,0 +1,107 @@
+// The desk's two pages, made of the kit's components: the customer's chat (signed out or in) and a conversation as an
+// agent works it. Each carries a theme switch, so the components can be seen — and photographed — in both schemes.
+namespace ConversationsKitTests;
+
+using Osysharp.Ui;
+using Osysharp.Conversations;
+
+/// The front door — a visitor with no address to type lands here, and is one click from the chat.
+[Page("/")]
+[AllowAnonymous]
+component DeskHome() {
+  render {
+    Stack(gap: 2, p: 4, align: Align.Center, minH: "100dvh", bg: Colors.Bg) {
+      Text("The test desk", fontSize: FontSize.Title);
+      Link("/chat") { Text("Talk to us"); }
+    }
+  }
+}
+
+[Page("/chat")]
+[AllowAnonymous]
+[Render(CSR)]
+component ChatPage() {
+  action Appearance() { Theme.Toggle(); }
+  render {
+    Row(justify: Justify.Center, p: 4, minH: "100dvh", bg: Colors.Bg) {
+      Stack(w: "100%", maxW: "34rem", gap: 2) {
+        Row(justify: Justify.End) { Button("Switch theme", onPress: Appearance, tone: Tone.Ghost, size: Size.Sm); }
+        ConversationWidget();
+      }
+    }
+  }
+}
+
+/// A page of the shop with the chat in its corner — and, above the first message, the shop's own help (the widget's
+/// `help` slot): what an app with a knowledge base puts there.
+[Page("/shop")]
+[AllowAnonymous]
+[Render(CSR)]
+component ShopPageWithChat() {
+  render {
+    Stack(gap: 2, p: 6, minH: "100dvh", bg: Colors.Bg) {
+      Text("The shop", fontSize: FontSize.Title);
+      Text("Everything for the garden.", color: Colors.TextMuted);
+      ConversationLauncher(title: "Ask the shop") {
+        slot help { Text("Opening hours: weekdays 9–17.", color: Colors.TextSecondary); }
+      }
+    }
+  }
+}
+
+[Page("/desk/{conversationId}")]
+[Authorize(IsConversationStaff)]
+[Render(CSR)]
+component DeskConversationPage(Guid conversationId) {
+  action Appearance() { Theme.Toggle(); }
+  render {
+    Stack(gap: 3, p: 4, minH: "100dvh", bg: Colors.Bg, w: "100%", maxW: "52rem", mx: "auto") {
+      Row(justify: Justify.Between, align: Align.Center) {
+        ConversationPresenceChip(conversationId, desk: true);
+        Button("Switch theme", onPress: Appearance, tone: Tone.Ghost, size: Size.Sm);
+      }
+      ConversationTranscript(conversationId, desk: true);
+      ConversationComposer(conversationId, desk: true);
+    }
+  }
+}
+
+/// The same conversation as a desk THREAD — full-width messages, the shape a helpdesk works in.
+[Page("/desk/{conversationId}/thread")]
+[Authorize(IsConversationStaff)]
+[Render(CSR)]
+component DeskThreadPage(Guid conversationId) {
+  action Appearance() { Theme.Toggle(); }
+  render {
+    Stack(gap: 3, p: 4, minH: "100dvh", bg: Colors.Bg, w: "100%", maxW: "52rem", mx: "auto") {
+      Row(justify: Justify.End) { Button("Switch theme", onPress: Appearance, tone: Tone.Ghost, size: Size.Sm); }
+      ConversationThread(conversationId);
+      ConversationComposer(conversationId, desk: true);
+    }
+  }
+}
+
+/// A customer's own conversation as a thread — what a portal shows the person it is with: their messages, the replies,
+/// never a note or a draft.
+[Page("/my/{conversationId}")]
+[Authorize]
+[Render(CSR)]
+component CustomerThreadPage(Guid conversationId) {
+  action Appearance() { Theme.Toggle(); }
+  render {
+    Stack(gap: 3, p: 4, minH: "100dvh", bg: Colors.Bg, w: "100%", maxW: "52rem", mx: "auto") {
+      Row(justify: Justify.End) { Button("Switch theme", onPress: Appearance, tone: Tone.Ghost, size: Size.Sm); }
+      ConversationThread(conversationId, desk: false);
+    }
+  }
+}
+
+[Page("/desk/party/{partyId}")]
+[Authorize(IsConversationStaff)]
+[Render(CSR)]
+component DeskPartyPage(Guid partyId) {
+  render {
+    Stack(gap: 3, p: 4, minH: "100dvh", bg: Colors.Bg, w: "100%", maxW: "40rem", mx: "auto") { PartyCard(partyId); }
+  }
+}
+

@@ -1,0 +1,43 @@
+// Osysharp.Conversations — what a signed-in customer and a desk of several people get. A signed-in customer speaks as
+// the party linked to their account (`CallerParty`); linking itself is the sign-in flow's (`LinkSignedInAccount`,
+// guarded in parties.test.osy and security.test.osy). Two people at the desk never answer one customer twice
+// (`AnsweredSince`).
+//
+// The desk (Ada) and Cus (linked) are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void a_signed_in_customer_starts_a_conversation_as_their_accounts_party() {
+  runas (Cus) {
+    StartConversation("Can I change my delivery address?", "Address");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    var seat = Participant.Single(p => p.Conversation.Subject == "Address" && p.Role == ParticipantRole.Customer);
+    Assert.Equal(PartyOf("cus@example.test").Id, seat.Party!.Id);
+  }
+}
+
+[Test(Desk)]
+void answered_since_names_a_colleagues_reply_and_never_your_own() {
+  Conversation? c = null;
+  runas (Ada) { c = OpenConversation(PartyOf("cus@example.test"), "Twice"); UnitOfWork.Commit(); }
+  var seen = 0;
+  runas (Ada) { seen = ConversationEntry.Where(e => e.Conversation == c).Max(e => e.Sequence) ?? -1; }
+  runas (Ada) {
+    Post(c!, "My own reply.");
+    UnitOfWork.Commit();
+    Assert.Null(AnsweredSince(c!, seen));            // your own reply never counts
+  }
+  runas (Inbox) { Post(c!, "Answered from the shared inbox."); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var first = AnsweredSince(c!, seen);
+    Assert.NotNull(first);
+    Assert.Equal("Answered from the shared inbox.", first!.Text);
+    var now = ConversationEntry.Where(e => e.Conversation == c).Max(e => e.Sequence) ?? -1;
+    Assert.Null(AnsweredSince(c!, now));             // read it — nothing new since
+  }
+}

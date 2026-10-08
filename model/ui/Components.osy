@@ -1,0 +1,795 @@
+// The conversation components — each a `[Composable]` an app puts on a page of its own (the desk's three panes, a
+// portal page, a chat widget in a corner). Every colour, face and size is a theme token, so the app's theme dresses
+// them; on the Switchboard floor (`Osysharp.Ui` 2.7) a live conversation's lamp breathes, and a note is tinted. What an
+// AI wrote wears the kit's own token, `ConversationAi` (Theme.osy): its drafts on the desk, the replies it sent, and the
+// replies a person sent from its draft — on the customer's side too, said plainly.
+//
+// ⚑ THEY READ THROUGH THE RULES, LIKE EVERY READ. A transcript on a customer's page lists what that customer may read —
+//   their conversation's customer-visible entries — and a new entry arrives because the platform's change signal makes
+//   the transcript re-read, never because a payload carried words. A note never reaches a customer's page.
+
+namespace Osysharp.Conversations;
+
+using Osysharp.Ui;
+using Osysharp.Storage;
+using Osysharp.Collaboration;
+
+/// One message on a transcript: who wrote it (as it was at the time), the channel it travelled on, when — and, for the
+/// desk, whether it is a note or an AI draft (tinted; a customer never sees one). What an AI wrote is marked for both
+/// sides (`AiMark`): a reply it sent says so, and one a person sent from its draft says who checked it. `desk` decides
+/// whose side is "mine".
+[Composable]
+public component ConversationBubble(Message message, bool desk = false, List<MessageAttachment>? files = null,
+                                    List<MessageText>? renderings = null) {
+  bool original = false;
+  // Another language in play — read from the message and its renderings, which arrive live when the language run (after
+  // the post) makes them: the desk reads a customer's message in the desk's language, a customer the rendering they
+  // were sent. Everything else is the original.
+  live var sent = renderings == null || renderings.Count == 0 ? null : renderings[0];
+  live var forDesk = desk && message.Direction == MessageDirection.Inbound && message.CanonicalSource == TextSource.Machine
+                     && message.CanonicalText != null;
+  live var forMe = !desk && sent != null;
+  live var words = forDesk ? message.CanonicalText ?? message.Text : forMe ? sent!.Text : message.Text;
+  live var note = forDesk ? "Translated from " + LanguageNameOf(message.Language ?? "")
+                : forMe ? "Translated from " + LanguageNameOf(message.Language ?? "en")
+                : desk && sent != null ? "Sent in " + string.Join(", ", renderings!.Select(r => LanguageNameOf(r.Language)))
+                : "";
+  action ToggleOriginal() { original = !original; }
+  render {
+    Row(justify: (desk ? message.Direction != MessageDirection.Inbound : message.Direction == MessageDirection.Inbound)
+                   ? Justify.End : Justify.Start,
+        w: "100%", animation: KitArrive) {
+      Stack(gap: 1, px: 3, py: 2, maxW: "34rem", rounded: Radius.Lg,
+            border: message.Visibility == EntryVisibility.AiInternal || message.ByAgent != null ? Colors.ConversationAi.Muted
+                  : Colors.Border,
+            bg: message.Visibility == EntryVisibility.AiInternal ? Colors.ConversationAi.Subtle
+              : message.Visibility != EntryVisibility.Customer ? Colors.Warning.Subtle
+              : (desk ? message.Direction != MessageDirection.Inbound : message.Direction == MessageDirection.Inbound)
+                ? Colors.Primary.Subtle : Colors.Surface,
+            color: Colors.OnSurface) {
+        Row(gap: 2, align: Align.Center) {
+          // The customer's own messages are "You" on their own page; everyone else is named as they were at the time.
+          Text(!desk && message.Direction == MessageDirection.Inbound ? "You"
+                 : message.ByName != "" ? message.ByName
+                 : (message.Direction == MessageDirection.Inbound ? "Customer" : "Support"),
+               fontWeight: FontWeight.Semibold, fontSize: FontSize.Label);
+          // The channel it travelled on — a reply by email reads differently from one in the chat.
+          if (message.Visibility == EntryVisibility.Customer) { Badge(message.ChannelKey, tone: Tone.Ghost); }
+          if (message.Visibility == EntryVisibility.Internal) { Badge("Internal note", tone: Tone.Warning); }
+          if (message.Visibility == EntryVisibility.AiInternal) { AiMark("AI draft — not sent"); }
+          else if (message.ByAgent != null) { AiMark(desk ? "Sent by AI" : "AI assistant"); }
+          Text(message.At.ToString("HH:mm"), color: Colors.TextMuted, fontSize: FontSize.Caption, fontFamily: Font.Mono);
+        }
+        // Translated, the translation is shown as words; as written, a fenced snippet is code and quoted text folds.
+        if (forDesk || forMe) { Text(original ? message.Text : words, whiteSpace: "pre-wrap"); }
+        else if (message.Format == TextFormat.Markdown) { Markdown(message.Text); }
+        else { MessageBody(message.Text, message.QuotedText); }
+        if (files != null && files.Count > 0) { MessageFiles(files); }
+        if (message.ApprovedFrom != null) { AiDraftedNote(message, desk); }
+        if (note != "") {
+          Row(gap: 2, align: Align.Center) {
+            Text(note, color: Colors.TextMuted, fontSize: FontSize.Caption);
+            if (forDesk) {
+              Button(original ? "Show translation" : "Show original", onPress: ToggleOriginal, tone: Tone.Ghost, size: Size.Sm);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The renderings of `messageId` in a conversation's list of them.
+public List<MessageText> RenderingsFor(List<MessageText> all, Guid messageId) {
+  return all.Where(r => r.Message.Id == messageId).ToList();
+}
+
+/// The mark on what an AI wrote: a small sparkle and its words, in the `ConversationAi` colour on its own wash — the
+/// same mark on a draft, a reply, the desk and the customer's page, so it is learned once.
+[Composable]
+public component AiMark(string words) {
+  render {
+    // Never squeezed: on a phone the writer's name gives way (it is cut with an ellipsis), never the mark.
+    Row(gap: 1, align: Align.Center, px: 2, rounded: Radius.Pill, bg: Colors.ConversationAi.Subtle, shrink: 0,
+        label: words) {
+      Icon(Icons.Sparkles, size: 12, color: Colors.ConversationAi);
+      Text(words, color: Colors.ConversationAi, fontSize: FontSize.Caption, fontWeight: FontWeight.Medium,
+           whiteSpace: WhiteSpace.Nowrap);
+    }
+  }
+}
+
+/// Under a reply a person sent from an AI's draft: that it was drafted by AI and who checked and sent it. The desk reads
+/// it as the record it is; the customer reads, plainly, that a person stood behind what an AI wrote.
+[Composable]
+public component AiDraftedNote(Message message, bool desk = true) {
+  render {
+    Row(gap: 1, align: Align.Center, wrap: Wrapping.Wrap) {
+      Icon(Icons.Sparkles, size: 12, color: Colors.ConversationAi);
+      Text(desk ? "Drafted by AI, sent by " + message.ByName
+                : "Written with AI, checked and sent by " + message.ByName,
+           color: Colors.ConversationAi, fontSize: FontSize.Caption);
+    }
+  }
+}
+
+/// For the desk, above a conversation: translation is OFF (the app's translator is not ready — its key is missing), or
+/// messages here were NOT translated (the translator failed) — with the way to try again. Nothing when all is well, or
+/// when the app translates nothing at all. `opened`: what the page already asked for the conversation
+/// (`OpenThread`) — then this asks nothing of its own as it opens.
+[Composable]
+public component ConversationLanguageNotice(Guid conversationId, ConversationOpening? opened = null) {
+  LanguageStatus asked = new LanguageStatus();
+  bool retried = false;
+  string said = "";
+  on mount { if (opened == null) { asked = LanguageStatusOf(conversationId); } }
+  live var status = opened != null && !retried ? opened.Language : asked;
+  action Retry() {
+    var again = TranslateConversationAgain(conversationId);
+    said = again == 1 ? "Translating 1 message again." : $"Translating {again} messages again.";
+    asked = LanguageStatusOf(conversationId);
+    retried = true;
+  }
+  render {
+    if (status.Off) {
+      Alert(status.Reason, title: "Translation is off", tone: Tone.Warning);
+    } else if (status.Untranslated > 0) {
+      Alert(status.Untranslated == 1 ? "One message here was not translated — you are reading it as it was written."
+                                     : $"{status.Untranslated} messages here were not translated — you are reading them as they were written.",
+            title: "Not translated", tone: Tone.Warning) {
+        Button("Try again", onPress: Retry, size: Size.Sm);
+      }
+    }
+    if (said != "") { Text(said, color: Colors.TextMuted, fontSize: FontSize.Caption); }
+  }
+}
+
+/// A conversation's timeline as a reader sees it — every entry they may read, in its one order: messages as bubbles,
+/// events as a line between them. Newest last, the latest `pageSize` first and "Show earlier" for the rest, and it
+/// marks the conversation read as it shows it.
+[Composable]
+public component ConversationTranscript(Guid conversationId, bool desk = false, int pageSize = 50) {
+  int shown = pageSize;
+  live var recent = ConversationEntry.Where(e => e.Conversation.Id == conversationId)
+    .OrderByDescending(e => e.Sequence).Take(shown);
+  // The files on this conversation's messages — one read, each message's handed to its bubble.
+  live var files = MessageAttachment.Where(a => a.Message.Conversation.Id == conversationId);
+  // What each reply was SENT as in another language — one read for the whole transcript; a customer reads the ones of
+  // their conversation, a note's never (the rules).
+  live var renderings = MessageText.Where(r => r.Message.Conversation.Id == conversationId && r.WasDelivered);
+
+  // What its events say, for this reader — said by the server in their language from each event's facts: the whole
+  // timeline's in ONE read as it opens (and again for the earlier ones it is asked for); a line that arrives later
+  // fetches its own as it appears (`TranscriptEvent`).
+  List<EventLine> said = [];
+  bool saidLoaded = false;
+  on mount {
+    said = ConversationEventLines(conversationId, shown);
+    saidLoaded = true;
+  }
+
+  action ShowEarlier() {
+    shown = shown + pageSize;
+    said = ConversationEventLines(conversationId, shown);
+  }
+
+  // Seen it — move the reader's mark, once per entry the reader has not been marked for: as the conversation opens, and
+  // as an entry arrives (so a reply read on an open page is not "unread"). `newestShown` is the newest entry of THIS
+  // conversation, and nothing while the transcript still shows the one it is leaving — so moving to another
+  // conversation asks once, not once for the move, once for its rows and once for the refetch the mark's own commit
+  // causes (three calls a ticket, measured on Harbour).
+  live var newestShown = recent.Count > 0 && recent.First().Conversation.Id == conversationId
+    ? recent.First().Id.ToString() : "";
+  on change { if (newestShown != "") { MarkConversationRead(conversationId); } }
+
+  render {
+    Stack(gap: 2, w: "100%", label: "Conversation") {
+      if (recent.Count >= shown) {
+        Row(justify: Justify.Center) { Button("Show earlier", onPress: ShowEarlier, tone: Tone.Ghost, size: Size.Sm); }
+      }
+      if (recent.Count == 0) {
+        EmptyState("No messages yet", body: "Messages appear here as they are written.");
+      }
+      foreach (var entry in recent.Reverse()) {
+        if (entry is Message message) {
+          ConversationBubble(message, desk, FilesFor(files.ToList(), message.Id), RenderingsFor(renderings.ToList(), message.Id));
+        } else if (entry is ConversationEvent happened) {
+          if (saidLoaded) { TranscriptEvent(happened, SentenceFor(said, happened.Id)); }
+        }
+      }
+    }
+  }
+}
+
+/// Something that happened, on a chat-shaped transcript — a centred quiet line. `sentence` is what it says for the
+/// reader (`ConversationEventLines`); a line that arrived after the transcript opened fetches its own as it appears.
+[Composable]
+public component TranscriptEvent(ConversationEvent happened, string sentence = "") {
+  string fetched = "";
+  on mount { if (sentence == "") { fetched = EventLineOf(happened.Id); } }
+  live var line = sentence != "" ? sentence : fetched;
+  render {
+    if (line != "") {
+      Row(justify: Justify.Center, gap: 2, align: Align.Center, py: 1) {
+        if (happened.Visibility != EntryVisibility.Customer) { Badge("Internal", tone: Tone.Warning); }
+        Text(line, color: Colors.TextMuted, fontSize: FontSize.Caption);
+        Text(happened.At.ToString("HH:mm"), color: Colors.TextMuted, fontSize: FontSize.Caption, fontFamily: Font.Mono);
+      }
+    }
+  }
+}
+
+/// A conversation as a DESK reads it — a thread, not a chat: every entry the reader may see at full width, newest
+/// last, so a long reply reads like the mail it often is. The customer's messages and the team's replies are cards
+/// with who wrote them, the channel they travelled on and when; an internal note is TINTED and named "Internal note"
+/// (a customer's page never has one to show — the rules, not this component, see to that); an AI draft is marked;
+/// events are a quiet line between them, said in the reader's language. On the desk, a reply that went out on a channel
+/// says whether it was sent. Marks the conversation read as it shows it. `ConversationTranscript` is the chat-shaped
+/// sibling for a widget. `onSplit`: what pressing `splitLabel` on a message a customer wrote does, with its id — the
+/// app's way to split it off (`SplitOff`, and whatever the new conversation is to the app); none: not offered.
+/// `opened`: what the page already asked for the conversation (`OpenThread(conversationId, pageSize)`, which also
+/// marks it read) — then the thread asks nothing of its own as it opens, and marks it read only as entries arrive.
+[Composable]
+public component ConversationThread(Guid conversationId, bool desk = true, int pageSize = 100,
+                                    Action<Guid>? onSplit = null, string splitLabel = "Split off…",
+                                    ConversationOpening? opened = null) {
+  int shown = pageSize;
+  live var recent = ConversationEntry.Where(e => e.Conversation.Id == conversationId)
+    .OrderByDescending(e => e.Sequence).Take(shown);
+  // The deliveries of this conversation's replies — staff-only rows, so a customer's page reads none.
+  live var deliveries = MessageDelivery.Where(d => d.Message.Conversation.Id == conversationId);
+  // The files on its messages — one read; a note's files reach only those who may read the note.
+  live var files = MessageAttachment.Where(a => a.Message.Conversation.Id == conversationId);
+  // What its replies were sent as in the customers' languages — one read for the thread.
+  live var renderings = MessageText.Where(r => r.Message.Conversation.Id == conversationId && r.WasDelivered);
+  // How many things its customers wrote — a split is offered only where there is something to split one FROM.
+  live var customerWrote = Message.Count(m => m.Conversation.Id == conversationId && m.Direction == MessageDirection.Inbound
+                                              && m.Visibility == EntryVisibility.Customer);
+
+  // What its events say, for this reader (see `ConversationTranscript`) — handed over by the page when it asked for the
+  // conversation as a whole (`opened`), until "Show earlier" asks for more.
+  List<EventLine> own = [];
+  bool ownLoaded = false;
+  bool earlier = false;
+  on mount {
+    if (opened == null) {
+      own = ConversationEventLines(conversationId, shown);
+      ownLoaded = true;
+    }
+  }
+  live var said = opened != null && !earlier ? opened.Said : own;
+  live var saidLoaded = opened != null && !earlier ? opened.Loaded : ownLoaded;
+
+  action ShowEarlier() {
+    shown = shown + pageSize;
+    own = ConversationEventLines(conversationId, shown);
+    ownLoaded = true;
+    earlier = true;
+  }
+
+  // Seen it — once per entry the reader has not been marked for (see `ConversationTranscript`). Opened by the page, the
+  // mark already stands at the newest place it saw (`opened.Newest`), so only what arrives after it asks again.
+  live var newestShown = recent.Count > 0 && recent.First().Conversation.Id == conversationId
+    && (opened == null || (opened.Loaded && recent.First().Sequence > opened.Newest))
+    ? recent.First().Id.ToString() : "";
+  on change { if (newestShown != "") { MarkConversationRead(conversationId); } }
+
+  render {
+    Stack(gap: 3, w: "100%", label: "Conversation") {
+      if (recent.Count >= shown) {
+        Row(justify: Justify.Center) { Button("Show earlier", onPress: ShowEarlier, tone: Tone.Ghost, size: Size.Sm); }
+      }
+      if (recent.Count == 0) {
+        EmptyState("Nothing written yet", body: "Messages and notes appear here as they are written.");
+      }
+      foreach (var entry in recent.Reverse()) {
+        if (entry is Message message) {
+          ThreadMessage(message, desk, DeliveryOf(deliveries.ToList(), message.Id), FilesFor(files.ToList(), message.Id),
+                        customerWrote > 1 ? onSplit : null, splitLabel, RenderingsFor(renderings.ToList(), message.Id));
+        } else if (entry is ConversationEvent happened) {
+          // A side conversation started here is drawn AS the side conversation — a card that opens into its thread.
+          if (desk && happened.Kind == "conversations.side-started" && happened.Side != null) {
+            SideConversationCard(happened.Side!.Id);
+          } else if (saidLoaded) {
+            ThreadEvent(happened, SentenceFor(said, happened.Id));
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The delivery that carried `messageId`, if any.
+public MessageDelivery? DeliveryOf(List<MessageDelivery> deliveries, Guid messageId) {
+  foreach (var d in deliveries) { if (d.Message.Id == messageId) { return d; } }
+  return null;
+}
+
+/// "Ines Moreau" → "IM": the initials an avatar shows when there is no picture.
+public string InitialsOf(string name) {
+  var parts = name.Trim().Split(" ").Where(p => p != "").ToList();
+  if (parts.Count == 0) { return "?"; }
+  if (parts.Count == 1) { return parts[0].Substring(0, 1).ToUpper(); }
+  return parts[0].Substring(0, 1).ToUpper() + parts[parts.Count - 1].Substring(0, 1).ToUpper();
+}
+
+/// One message in a desk thread. What an AI wrote is marked in `ConversationAi`: a draft has its hairline and wash, a
+/// reply it sent says so, and a reply a person sent from its draft says who checked it — on the customer's side too.
+[Composable]
+public component ThreadMessage(Message message, bool desk = true, MessageDelivery? delivery = null,
+                                List<MessageAttachment>? files = null, Action<Guid>? onSplit = null,
+                                string splitLabel = "Split off…", List<MessageText>? renderings = null) {
+  live var note = message.Visibility != EntryVisibility.Customer;
+  live var draft = message.Visibility == EntryVisibility.AiInternal;
+  live var inbound = message.Direction == MessageDirection.Inbound;
+  live var name = message.ByName != "" ? message.ByName : (inbound ? "Customer" : "Support");
+  // BOTH TEXTS. A customer's message in another language is read on the desk in the desk's — its canonical copy — with
+  // what they actually wrote one press away; a reply sent in the customer's language says so on the desk, with what they
+  // received, and reaches the CUSTOMER as that rendering, with the original one press away.
+  live var translated = desk && inbound && message.CanonicalSource == TextSource.Machine && message.CanonicalText != null;
+  live var sentIn = renderings == null ? [] : renderings!;
+  live var received = !desk && !inbound && sentIn.Count > 0;
+  live var otherLabel = translated ? "The original" : received ? "As it was written" : "What they received";
+  bool other = false;
+  action ToggleOther() { other = !other; }
+
+  render {
+    Stack(gap: 2, w: "100%", px: 4, py: 3, rounded: Radius.Lg, borderW: 1, animation: KitArrive,
+          border: draft || message.ByAgent != null ? Colors.ConversationAi.Muted : note ? Colors.Warning.Muted : Colors.Border,
+          bg: draft ? Colors.ConversationAi.Subtle : note ? Colors.Warning.Subtle : Colors.Surface,
+          label: draft ? "AI draft from " + name : note ? "Internal note from " + name : "Message from " + name) {
+      Row(gap: 2, align: Align.Center, minW: "0") {
+        if (draft || message.ByAgent != null) {
+          // An AI has no face and no initials: its sparkle, in its colour, where a person's avatar would be.
+          // On a draft's wash the circle is the surface, so it still reads as one.
+          Box(w: Length.AvatarSm, h: Length.AvatarSm, rounded: Radius.Circle,
+              bg: draft ? Colors.Surface : Colors.ConversationAi.Subtle,
+              align: Align.Center, justify: Justify.Center, shrink: 0, decorative: true) {
+            Icon(Icons.Sparkles, size: 14, color: Colors.ConversationAi);
+          }
+        } else {
+          Avatar(InitialsOf(name), size: Size.Sm);
+        }
+        // A long name is cut, never the card: on a phone the head row has no room to spare.
+        Text(name, fontWeight: FontWeight.Semibold, fontSize: FontSize.Label, whiteSpace: WhiteSpace.Nowrap,
+             overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, minW: "0");
+        if (message.Visibility == EntryVisibility.Internal) { Text("internal note", color: Colors.Warning, fontSize: FontSize.Caption); }
+        if (draft) { AiMark("AI draft — not sent"); }
+        else if (message.ByAgent != null) { AiMark(desk ? "Sent by AI" : "AI assistant"); }
+        // A reply an AI sent already says so in its mark; "replied" beside it is one word too many on a phone.
+        if (!note && message.ByAgent == null) {
+          Text(inbound ? "via " + message.ChannelKey : "replied", color: Colors.TextMuted, fontSize: FontSize.Caption);
+        }
+        Spacer();
+        // What a customer wrote can be split off into a conversation of its own — on the desk, where the app offers it.
+        // A quiet icon with its name on hover: it is a rare move, and a word here crowds the head of every message.
+        if (desk && onSplit != null && inbound && !note) {
+          IconButton(splitLabel, () => onSplit!(message.Id), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.ExternalLink, size: 14); }
+        }
+        Text(message.At.ToString("d MMM, HH:mm"), color: Colors.TextMuted, fontSize: FontSize.Caption, fontFamily: Font.Mono,
+             whiteSpace: WhiteSpace.Nowrap);
+      }
+      if (translated) { Text(message.CanonicalText ?? "", whiteSpace: "pre-wrap"); }
+      else if (received) { Text(sentIn[0].Text, whiteSpace: "pre-wrap"); }
+      else if (message.Format == TextFormat.Markdown) { Markdown(message.Text); }
+      else { MessageBody(message.Text, message.QuotedText); }
+      if (translated || received || (desk && sentIn.Count > 0)) {
+        Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+          Icon(Icons.Messages, size: 14, color: Colors.TextMuted);
+          Text(translated ? "Translated from " + LanguageNameOf(message.Language ?? "")
+               : received ? "Translated from " + LanguageNameOf(message.Language ?? "en")
+               : "Sent in " + string.Join(", ", sentIn.Select(r => LanguageNameOf(r.Language))),
+               color: Colors.TextMuted, fontSize: FontSize.Caption);
+          Button(other ? (desk && !translated ? "Hide what they received" : "Hide the original")
+                       : (desk && !translated ? "Show what they received" : "Show the original"),
+                 onPress: ToggleOther, tone: Tone.Ghost, size: Size.Sm);
+        }
+        if (other) {
+          Stack(gap: 1, px: 3, py: 2, rounded: Radius.Md, bg: Colors.Sunken, label: otherLabel) {
+            if (translated || received) {
+              Text("As written, in " + LanguageNameOf(message.Language ?? (received ? "en" : "")), color: Colors.TextMuted,
+                   fontSize: FontSize.Caption);
+              if (message.Format == TextFormat.Markdown) { Markdown(message.Text); } else { MessageBody(message.Text, message.QuotedText); }
+            } else {
+              foreach (var r in sentIn) {
+                Text("In " + LanguageNameOf(r.Language), color: Colors.TextMuted, fontSize: FontSize.Caption);
+                Text(r.Text, whiteSpace: "pre-wrap");
+              }
+            }
+          }
+        }
+      }
+      if (files != null && files.Count > 0) { MessageFiles(files); }
+      if (message.ApprovedFrom != null) { AiDraftedNote(message, desk); }
+      // A reply that went out on a channel says what became of it — the desk must never believe "sent" that was not.
+      if (desk && delivery != null) {
+        Row(gap: 1, align: Align.Center) {
+          if (delivery.State == DeliveryState.Sent && delivery.Outcome == DeliveryOutcome.Failed) {
+            Lamp(tone: Tone.Danger);
+            Text("Did not arrive" + (delivery.To != null ? " at " + delivery.To : "") + " — " + (delivery.Problem ?? "the carrier gave it back"),
+                 color: Colors.Danger, fontSize: FontSize.Caption);
+          } else if (delivery.State == DeliveryState.Sent) {
+            Icon(Icons.Check, size: 14, color: Colors.Success);
+            Text("Sent by " + delivery.ChannelKey + (delivery.To != null ? " to " + delivery.To : ""), color: Colors.TextMuted,
+                 fontSize: FontSize.Caption);
+          }
+          if (delivery.State == DeliveryState.Queued) {
+            Lamp(live: true, tone: Tone.Primary);
+            Text("Sending by " + delivery.ChannelKey + "…", color: Colors.TextMuted, fontSize: FontSize.Caption);
+          }
+          if (delivery.State == DeliveryState.AwaitingLanguage) {
+            Lamp(live: true, tone: Tone.Primary);
+            Text("Translating, then sending by " + delivery.ChannelKey + "…", color: Colors.TextMuted, fontSize: FontSize.Caption);
+          }
+          if (delivery.State == DeliveryState.Held) {
+            Lamp(tone: Tone.Danger);
+            Text("Not sent — " + (delivery.Problem ?? "held"), color: Colors.Danger, fontSize: FontSize.Caption);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Something that happened, as a quiet line between messages — internal ones say so. `sentence` is what it says, in the
+/// reader's language (`ConversationEventLines`); a line that arrived after the thread opened fetches its own as it
+/// appears. Who did it is added when the sentence does not already name them.
+[Composable]
+public component ThreadEvent(ConversationEvent happened, string sentence = "") {
+  string fetched = "";
+  on mount { if (sentence == "") { fetched = EventLineOf(happened.Id); } }
+  live var line = sentence != "" ? sentence : fetched;
+  render {
+    if (line != "") {
+      Row(gap: 2, align: Align.Center, px: 4, py: 1, animation: KitArrive) {
+        Box(w: "6px", h: "6px", rounded: Radius.Circle, bg: Colors.Border, shrink: 0, decorative: true) { }
+        Text(happened.ByName != "" && happened.ByName != happened.Source && !line.Contains(happened.ByName)
+               ? $"{line} · by {happened.ByName}" : line,
+             color: Colors.TextMuted, fontSize: FontSize.Caption);
+        // One line, as on a message: on a phone a long summary squeezed it to "4" / "Oct," / "12:54".
+        Text(happened.At.ToString("d MMM, HH:mm"), color: Colors.TextMuted, fontSize: FontSize.Caption, fontFamily: Font.Mono,
+             whiteSpace: WhiteSpace.Nowrap);
+      }
+    }
+  }
+}
+
+/// Write in a conversation. The desk's composer can write a NOTE (`desk: true` shows the switch) — still a rule, not a
+/// toggle: a customer's composer cannot write one whatever it sends. Tells the other side the writer is typing, and
+/// that they stopped, from a one-second clock (nothing is sent per keystroke). `notes: false` hides the switch where
+/// there is nobody to keep a note from (a team's own chat); `label` names the field. `alwaysNote`: every message is a
+/// note (a thread inside the team). `shortcut`: the key that sends — "" for none, where it sits inside a page that has
+/// a composer of its own (a side conversation's card).
+[Composable]
+public component ConversationComposer(Guid conversationId, bool desk = false, string placeholder = "Write a message…",
+                                      bool notes = true, string label = "", bool alwaysNote = false,
+                                      string shortcut = "Mod+Enter") {
+  string draft = "";
+  bool note = false;
+  live var asNote = note || alwaysNote;
+  bool announced = false;
+  int idle = 0;
+  string lastSeen = "";
+  string problem = "";
+  // Files pasted, dropped or picked — kept as the writer's own, going with the next message.
+  List<PendingFile> pending = [];
+
+  action Took(UploadedFile upload) {
+    problem = "";
+    try {
+      var kept = KeepUpload(upload);
+      var next = pending.ToList();
+      next.Add(kept);
+      pending = next;
+    }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+
+  action Untake(Guid id) { pending = pending.Where(p => p.Id != id).ToList(); }
+
+  action Send() {
+    problem = "";
+    if (draft.Trim() == "" && pending.Count == 0) { return; }
+    try {
+      var ids = pending.Select(p => p.Id).ToList();
+      if (desk) { ReplyFromDesk(conversationId, draft, note || alwaysNote, ids); } else { ReplyAsCustomer(conversationId, draft, ids); }
+      draft = "";
+      pending = [];
+      note = false;
+      if (announced) { announced = false; TypingInConversation(conversationId, false); }
+    }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+
+
+  // Typing, on transitions only: started (a draft appeared), stopped (sent, cleared, or untouched for five ticks).
+  on every (TimeSpan.FromSeconds(1)) {
+    if (draft != lastSeen) { lastSeen = draft; idle = 0; } else { idle = idle + 1; }
+    if (draft.Trim() != "" && !announced && idle == 0) {
+      announced = true;
+      TypingInConversation(conversationId, true);
+    } else if (announced && (draft.Trim() == "" || idle >= 5)) {
+      announced = false;
+      TypingInConversation(conversationId, false);
+    }
+  }
+
+  render {
+    // A screenshot pasted into the message box, or a file dropped anywhere on the composer, is attached (`onFile`).
+    Stack(gap: 2, w: "100%", p: 3, rounded: Radius.Lg, border: asNote ? Colors.Warning : Colors.Border,
+          bg: asNote ? Colors.Warning.Subtle : Colors.Elevated, onFile: Took) {
+      TextAreaField(label != "" ? label : desk ? (asNote ? "Note to the team" : "Reply") : "Your message", value: draft, rows: 3,
+                    placeholder: asNote ? "Only your team sees this." : placeholder);
+      if (pending.Count > 0) { PendingFiles(pending, onRemove: Untake); }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      Row(gap: 2, align: Align.Center, justify: Justify.Between) {
+        Row(gap: 2, align: Align.Center) {
+          if (desk && notes && !alwaysNote) { Switch("Internal note", value: note); }
+          Upload("Attach files", accept: "*/*", privately: true, multiple: true, onUploaded: Took, label: "Attach files",
+                 color: Colors.Primary, fontWeight: FontWeight.Semibold, fontSize: FontSize.Caption, cursor: Cursor.Pointer);
+        }
+        Button(asNote ? "Add note" : "Send", onPress: Send, tone: asNote ? Tone.Warning : Tone.Primary, shortcut: shortcut);
+      }
+    }
+  }
+}
+
+/// Who else is on a conversation right now — for the desk, the colleagues who have it open (and what they are doing,
+/// so two people do not answer at once); for both sides, whoever is typing.
+[Composable]
+public component ConversationPresenceChip(Guid conversationId, bool desk = false) {
+  live var typing = ConversationTyping.For(conversationId).Listen();
+  live var here = ConversationPresence.For(conversationId).Here;
+  // The customer's side says it is here — a signed-out visitor included, by its visit, which never leaves the server.
+  on mount { if (!desk) { ConversationPresence.For(conversationId).Announce(new ConversationSeat { Activity = "viewing", Customer = true }); } }
+
+  render {
+    Row(gap: 2, align: Align.Center, minH: "1.5rem") {
+      if (desk) { ConversationDeskSeats(conversationId); }
+      if (desk && here.Any(s => s.Customer)) {
+        Row(gap: 1, align: Align.Center) {
+          Lamp(live: true);
+          Text("The customer is here", color: Colors.TextMuted, fontSize: FontSize.Caption);
+        }
+      }
+      if (typing.Count > 0 && typing.Last().Typing && OtherSide(typing.Last(), desk, Session.CurrentUser?.Id ?? Guid.Empty)) {
+        Lamp(live: true);
+        Text($"{(typing.Last().Name != "" ? typing.Last().Name : (desk ? "The customer" : "Support"))} is typing…",
+             color: Colors.TextMuted, fontSize: FontSize.Label);
+      }
+    }
+  }
+}
+
+/// The desk's colleagues on this conversation (staff presence). Announces the viewer as "viewing" on mount.
+[Composable]
+public component ConversationDeskSeats(Guid conversationId) {
+  // The Collaboration kit's seats on this record — the one seat set (see Realtime.osy).
+  render { RecordSeats(conversationId); }
+}
+
+/// Is a typing signal from the OTHER side of the conversation? A customer's page shows the desk's (they are signed in);
+/// the desk's shows the customer's and its colleagues'. Never your own.
+public bool OtherSide(TypingSignal signal, bool desk, Guid me) {
+  if (signal.Who != null && signal.Who.Id == me) { return false; }
+  return desk ? true : signal.Who != null;
+}
+
+/// The customer's chat, for a page of the app's own — signed out or in. With no conversation yet it asks for a first
+/// message (and, optionally, a name); after that it is this visit's (or account's) latest conversation: who is typing,
+/// the whole timeline, and a composer. A reload keeps it — the visit is the browser's.
+///
+/// `slot help { … }` is the app's, shown above the first message while there is no conversation yet — the place for a
+/// search of the app's help articles, so a person can find the answer before they ask:
+///     ConversationWidget { slot help { KnowledgeQuickSearch(); } }
+[Composable]
+public component ConversationWidget(string? title = null, string? intro = null) {
+  // The one that moved last — after a continue link, the one its mail was about.
+  live var mine = Conversation.Where(c => c.LastEntryAt != null).OrderByDescending(c => c.LastEntryAt).Take(1);
+  string name = "";
+  string email = "";
+  string first = "";
+  string problem = "";
+  // Its words — the app's `ConversationCopy` (`title`/`intro` given here win), in the reader's language.
+  WidgetWords words = new WidgetWords();
+  live var mailNotice = words.MailNotice;
+  // A screenshot pasted into the first message, or a file dropped on the form, goes with it.
+  List<PendingFile> pending = [];
+
+  on mount { words = ChatWidgetWords(); }
+
+  action Took(UploadedFile upload) {
+    problem = "";
+    try {
+      var next = pending.ToList();
+      next.Add(KeepUpload(upload));
+      pending = next;
+    }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+
+  action Untake(Guid id) { pending = pending.Where(p => p.Id != id).ToList(); }
+
+  action Start() {
+    problem = "";
+    if (first.Trim() == "" && pending.Count == 0) { problem = words.WriteFirst; return; }
+    try { StartFromWidget(first, name, email, pending.Select(p => p.Id).ToList()); first = ""; pending = []; }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Card(title: title ?? words.Title) {
+      if (mine.Count == 0) {
+        Stack(gap: 3, onFile: Took) {
+          Slot("help");
+          Text(intro ?? words.Intro, color: Colors.TextMuted);
+          Field(words.NameLabel, value: name, placeholder: words.Optional);
+          // Only where the desk mails replies on: an address nobody would ever write to is not worth asking for.
+          if (mailNotice != "") {
+            Field(words.EmailLabel, value: email, type: "email", placeholder: words.Optional, hint: mailNotice);
+          }
+          TextAreaField(words.MessageLabel, value: first, rows: 3);
+          if (pending.Count > 0) { PendingFiles(pending, onRemove: Untake); }
+          if (problem != "") { Alert(problem, tone: Tone.Danger); }
+          Row(gap: 2, align: Align.Center, justify: Justify.Between) {
+            Upload(words.Attach, accept: "*/*", privately: true, multiple: true, onUploaded: Took, label: words.Attach,
+                   color: Colors.Primary, fontWeight: FontWeight.Semibold, fontSize: FontSize.Caption, cursor: Cursor.Pointer);
+            Button(words.Start, onPress: Start, tone: Tone.Primary);
+          }
+        }
+      } else {
+        foreach (var conversation in mine) {
+          Stack(gap: 3) {
+            ConversationPresenceChip(conversation.Id);
+            ConversationTranscript(conversation.Id);
+            ConversationComposer(conversation.Id);
+            if (mailNotice != "") { ConversationProveAddress(); }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The chat as a button in the corner of every page it is placed on — the end corner, so it is on the left in a
+/// right-to-left page — that opens the widget in a panel over the page. Place it once, in a layout, and it follows the
+/// person from page to page; the panel stays open while they move. `slot help` is the widget's. `lift`: how far above
+/// the window's bottom edge it sits — raise it above a phone's bottom bar (`lift: Layout.AtLeast(Tablet) ? "1.25rem" : "5.5rem"`).
+///     ConversationLauncher { slot help { KnowledgeQuickSearch(); } }
+[Composable]
+[AllowAnonymous]
+public component ConversationLauncher(string? title = null, string? intro = null, string? label = null,
+                                      string lift = "1.25rem") {
+  bool open = false;
+  // Its name and its button's — the app's `ConversationCopy`, in the reader's language; `label` given here wins.
+  WidgetWords words = new WidgetWords();
+  on mount { words = ChatWidgetWords(); }
+  live var named = label ?? words.LauncherLabel;
+  action Toggle() { open = !open; }
+  action Close() { open = false; }
+  render {
+    Box(position: Position.Fixed, bottom: lift, right: 5, z: ZIndex.Overlay, label: named) {
+      if (open) {
+        // The widget's own card IS the panel — one frame, its title row carrying the close button.
+        Box(position: Position.Absolute, bottom: "64px", right: 0, w: Layout.AtLeast(Tablet) ? "380px" : "calc(100vw - 2.5rem)",
+            maxH: "calc(100vh - 7rem)", overflowY: Overflow.Auto, rounded: Radius.Lg, shadow: Shadow.Floating,
+            animation: KitArrive, role: UiRole.Dialog, label: title ?? words.Title) {
+          ConversationWidget(title, intro) { slot help { Slot("help"); } }
+          Box(position: Position.Absolute, top: 3, right: 3) {
+            IconButton(words.LauncherClose, Close, tone: Tone.Ghost, size: Size.Sm) { Icon(Icons.Close); }
+          }
+        }
+      }
+      Pressable(onClick: Toggle, label: open ? words.LauncherClose : named, w: "52px", h: "52px", rounded: Radius.Circle,
+                bg: Colors.Primary, color: Colors.OnPrimary, shadow: Shadow.Floating, cursor: Cursor.Pointer,
+                expanded: open) {
+        Row(justify: Justify.Center, align: Align.Center, w: "100%", h: "100%") {
+          if (open) { Icon(Icons.Close, size: 22); } else { Icon(Icons.Messages, size: 22); }
+        }
+      }
+    }
+  }
+}
+
+/// "Have you written to us before?" — prove an address with a mailed code, and the conversations it had with the desk
+/// are this browser's from then on. Shown by the widget where the desk sends mail; a claim until the code comes back.
+[Composable]
+public component ConversationProveAddress() {
+  bool open = false;
+  bool sent = false;
+  string address = "";
+  string code = "";
+  string problem = "";
+  string done = "";
+
+  action Open() { open = true; }
+  action Send() {
+    problem = SendAddressCode(address);
+    if (problem == "") { sent = true; }
+  }
+  action Prove() {
+    problem = ProveAddress(address, code);
+    if (problem == "") { done = "Done — your earlier conversations with us are here now."; open = false; }
+  }
+
+  render {
+    Stack(gap: 2, w: "100%") {
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (!open && done == "") {
+        Button("Written to us before? Get your earlier conversations", onPress: Open, tone: Tone.Ghost, size: Size.Sm);
+      }
+      if (open) {
+        Stack(gap: 2, p: 3, rounded: Radius.Lg, border: Colors.Border, bg: Colors.Elevated) {
+          if (!sent) {
+            Field("Your email", value: address, type: "email", placeholder: "you@example.com", onEnter: Send,
+                  hint: "We mail a code to it — the code shows it is yours.");
+            Button("Email me a code", onPress: Send, tone: Tone.Primary, size: Size.Sm);
+          } else {
+            Text($"We sent a code to {address}. It works for 15 minutes.", color: Colors.TextMuted, fontSize: FontSize.Label);
+            Field("Code", value: code, placeholder: "123 456", onEnter: Prove);
+            Button("Show my conversations", onPress: Prove, tone: Tone.Primary, size: Size.Sm);
+          }
+          if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        }
+      }
+    }
+  }
+}
+
+/// The desk's card for a party: its addresses and numbers and how far each is PROVEN (a proof, a mail received from
+/// it, an agent's say-so — only the first is proof), who it is probably the same as (merge one in with a click), and
+/// its merges (undo one). A suggestion never merges by itself.
+[Composable]
+public component PartyCard(Guid partyId) {
+  PartyCardFacts facts = new PartyCardFacts();
+  string problem = "";
+
+  on mount { facts = PartyCardOf(partyId); }
+  action Refresh() { facts = PartyCardOf(partyId); }
+  action MergeIn(Guid other) {
+    problem = "";
+    try { MergeIntoParty(partyId, other); } catch (Exception ex) { problem = ex.Message; }
+    facts = PartyCardOf(partyId);
+  }
+  action Undo(Guid merge) {
+    problem = "";
+    try { UnmergeParties(merge); } catch (Exception ex) { problem = ex.Message; }
+    facts = PartyCardOf(partyId);
+  }
+
+  render {
+    Card(title: facts.Name) {
+      Stack(gap: 3) {
+        if (facts.MergedInto != "") { Alert($"Merged into {facts.MergedInto}.", tone: Tone.Default); }
+        if (facts.HasAccount) { Badge("Signed-in customer", tone: Tone.Ghost); }
+        Stack(gap: 1, role: UiRole.List, label: "Addresses and numbers") {
+          foreach (var p in facts.Points) {
+            Row(gap: 2, align: Align.Center, role: UiRole.ListItem) {
+              Text(p.Value, fontFamily: Font.Mono, fontSize: FontSize.Label);
+              Badge(p.Standing, tone: p.Proven ? Tone.Success : Tone.Ghost);
+            }
+          }
+        }
+        if (facts.Suggestions.Count > 0) {
+          Stack(gap: 1, label: "Probably the same person") {
+            Text("Probably the same person", fontWeight: FontWeight.Semibold, fontSize: FontSize.Label);
+            foreach (var s in facts.Suggestions) {
+              Row(gap: 2, align: Align.Center, justify: Justify.Between) {
+                Text($"{s.Name} — shares {s.Shares}", color: Colors.TextMuted, fontSize: FontSize.Label);
+                Button($"Merge {s.Name} into this one", onPress: () => MergeIn(s.Party), tone: Tone.Ghost, size: Size.Sm);
+              }
+            }
+          }
+        }
+        foreach (var m in facts.Merges) {
+          Row(gap: 2, align: Align.Center, justify: Justify.Between) {
+            Text(m.Sentence, color: Colors.TextMuted, fontSize: FontSize.Caption);
+            if (m.CanUndo) { Button("Undo", onPress: () => Undo(m.Merge), tone: Tone.Ghost, size: Size.Sm); }
+          }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      }
+    }
+  }
+}
+

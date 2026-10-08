@@ -1,0 +1,257 @@
+// Osysharp.Conversations — language and redaction. Every message keeps its original (scrubbed of card numbers and
+// secrets as it is stored) and gains a redacted copy in the desk's language; a reply reaches each customer in theirs,
+// recorded as the text they were sent. The desk's translator TAGS instead of translating (`[sv] …`) and records what it
+// was handed (`Handed`), so a test reads exactly what went where — tests/model/app.osy.
+//
+// ⚑ TRANSLATION RUNS AFTER THE POST (`MessageLanguage`, on a clock due at once), so a test that reads a translation
+//   first lets the background work run: `Background.Settle()`.
+//
+// The desk (Ada), Cus, Dee and Eve are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+InboundResult MailIn(string from, string id, string text, string subject = "Order") {
+  return ReceiveInbound(new InboundMessage { ChannelKey = "email", Endpoint = "support@desk.test", From = from,
+                                             ExternalId = id, Subject = subject, Text = text });
+}
+
+[Test(Desk)]
+void a_swedish_message_keeps_its_swedish_and_gains_an_english_copy() {
+  runas (Inbox) { MailIn("ana@example.test", "<s1@example.test>", "Hej, jag har inte fått min beställning."); UnitOfWork.Commit(); }
+  Background.Settle();
+  runas (Ada) {
+    var m = Message.Single();
+    Assert.Equal("Hej, jag har inte fått min beställning.", m.Text);
+    Assert.Equal("sv", m.Language);
+    Assert.Equal("[en] Hej, jag har inte fått min beställning.", m.CanonicalText);
+    Assert.Equal(TextSource.Machine, m.CanonicalSource);
+    // …and the customer is now known to write Swedish — what replies to her are rendered into.
+    Assert.Equal("sv", m.ByParty!.Language);
+  }
+}
+
+[Test(Desk)]
+void an_english_reply_reaches_a_swedish_customer_in_swedish_marked_as_translated() {
+  runas (Inbox) { MailIn("ana@example.test", "<s1@example.test>", "Hej, jag har inte fått min beställning."); UnitOfWork.Commit(); }
+  Background.Settle();
+  runas (Ada) {
+    Post(Conversation.Single(), "It left the warehouse this morning.");
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    var reply = Message.Single(m => m.Direction == MessageDirection.Outbound);
+    // The desk's words are kept as written…
+    Assert.Equal("It left the warehouse this morning.", reply.Text);
+    Assert.Equal("en", reply.Language);
+    // …and the customer's rendering is recorded, by machine, by which engine.
+    var sv = MessageText.Single(t => t.Message == reply);
+    Assert.Equal("sv", sv.Language);
+    Assert.Equal("[sv] It left the warehouse this morning.", sv.Text);
+    Assert.Equal(TextSource.Machine, sv.Source);
+    Assert.Equal("tagging", sv.Engine);
+    // The desk is told what the customer was sent; the customer, what she is reading.
+    Assert.Equal("Sent in Swedish", ShownFor(reply.Id, true).Note);
+    var hers = ShownFor(reply.Id, false);
+    Assert.Equal("[sv] It left the warehouse this morning.", hers.Text);
+    Assert.Equal("Translated from English", hers.Note);
+  }
+}
+
+[Test(Desk)]
+void the_text_the_customer_received_is_recorded_as_delivered() {
+  runas (Inbox) { MailIn("ana@example.test", "<s1@example.test>", "Hej, jag har inte fått min beställning."); UnitOfWork.Commit(); }
+  Background.Settle();
+  runas (Ada) {
+    Post(Conversation.Single(), "It left the warehouse this morning.");
+    UnitOfWork.Commit();
+  }
+  // The delivery WAITS for her rendering — it is made after the post — and then sends that, never the English.
+  Background.Settle();
+  runas (Ada) {
+    // What the CARRIER was handed is her rendering — and that rendering is the one marked as delivered.
+    var sent = Carried.Single();
+    Assert.Equal("[sv] It left the warehouse this morning.", sent.Text);
+    var delivered = MessageText.Single(t => t.WasDelivered);
+    Assert.Equal(sent.Text, delivered.Text);
+  }
+}
+
+[Test(Desk)]
+void a_card_number_never_reaches_the_translator_or_the_store() {
+  runas (Inbox) {
+    MailIn("ana@example.test", "<s1@example.test>",
+           "Hej, jag har inte fått min beställning. Mitt kort är 4111 1111 1111 1111 cvv 123, ring 070-123 45 67.");
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    var m = Message.Single();
+    // Stored scrubbed: the last four digits, never the number, never its security code.
+    Assert.True(!m.Text.Contains("4111 1111 1111 1111"));
+    Assert.Contains("[card ••••1111]", m.Text);
+    Assert.Contains("cvv [•••]", m.Text);
+    // The original keeps the phone number (the tenant's own record); the copy a model and a search read does not.
+    Assert.Contains("070-123 45 67", m.Text);
+    Assert.True(!m.CanonicalText!.Contains("070-123 45 67"));
+    // And the translator was never handed the card, nor the phone number.
+    foreach (var h in Handed.ToList()) {
+      Assert.True(!h.Text.Contains("4111"));
+      Assert.True(!h.Text.Contains("070-123 45 67"));
+    }
+    Assert.Equal(1, Handed.Count());
+  }
+}
+
+[Test(Desk)]
+void a_card_number_in_a_web_chat_or_a_desk_reply_is_never_stored_either() {
+  runas (new Visitor { Id = "visit-pay" }) { StartConversation("Can you charge 5555555555554444 for the order?", "Pay"); }
+  runas (Ada) {
+    Post(Conversation.Single(), "Please never send a card here — we removed 5555 5555 5555 4444 from the chat.");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal(0, Message.Count(m => m.Text.Contains("5555555555554444") || m.Text.Contains("5555 5555 5555 4444"))); }
+}
+
+[Test(Desk)]
+void with_no_translator_nothing_is_translated_and_the_original_is_the_canonical_copy() {
+  runas (Ada) { new TranslatorDown(); UnitOfWork.Commit(); }
+  runas (Inbox) { MailIn("ana@example.test", "<s1@example.test>", "Hej, jag har inte fått min beställning."); UnitOfWork.Commit(); }
+  runas (Ada) {
+    Post(Conversation.Single(), "It left the warehouse this morning.");
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    var m = Message.Single(x => x.Direction == MessageDirection.Inbound);
+    Assert.Equal(null, m.Language);
+    Assert.Equal("Hej, jag har inte fått min beställning.", m.CanonicalText);
+    Assert.Equal(TextSource.Original, m.CanonicalSource);
+    Assert.Equal(0, MessageText.Count());
+    Assert.Equal(0, Handed.Count());
+    // …and the desk is told why, in words it can act on.
+    var status = LanguageStatusOf(m.Conversation.Id);
+    Assert.True(status.Off);
+    Assert.Equal("The tagging translator's key is missing.", status.Reason);
+    Assert.Equal("Not translated — The tagging translator's key is missing.", ShownFor(m.Id, true).Note);
+  }
+}
+
+/// A translator that cannot run is not handed work (SP-73): the message has none — no run that only ends itself — and is
+/// still counted as untranslated, and translated once the translator is back and the desk asks.
+[Test(Desk)]
+void a_message_that_came_while_the_translator_was_down_is_translated_once_it_is_back() {
+  runas (Ada) { new TranslatorDown(); UnitOfWork.Commit(); }
+  runas (Inbox) { MailIn("ana@example.test", "<s1@example.test>", "Hej, jag har inte fått min beställning."); UnitOfWork.Commit(); }
+  Background.Settle();
+  runas (Ada) {
+    Assert.Equal(0, MessageLanguageWork.Count());
+    var c = Conversation.Single();
+    Assert.Equal(1, LanguageStatusOf(c.Id).Untranslated);
+    Assert.Equal("Not translated — The tagging translator's key is missing.", ShownFor(Message.Single().Id, true).Note);
+    TranslatorDown.Single().Down = false;
+    UnitOfWork.Commit();
+    Assert.Equal(1, LanguageStatusOf(c.Id).Untranslated);
+    Assert.Equal(1, TranslateConversationAgain(c.Id));
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    Assert.Equal(TextSource.Machine, Message.Single().CanonicalSource);
+    Assert.Equal(LanguageWorkState.Done, MessageLanguageWork.Single().State);
+    Assert.Equal(0, LanguageStatusOf(Conversation.Single().Id).Untranslated);
+  }
+}
+
+// ── after the post ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Desk)]
+void nothing_is_translated_in_the_commit_that_writes_the_message() {
+  runas (Inbox) { MailIn("ana@example.test", "<s1@example.test>", "Hej, jag har inte fått min beställning."); UnitOfWork.Commit(); }
+  // Written, and nothing was asked of the translator: a slow one cannot slow the post, and one that is down cannot
+  // stop it. The redacted original stands as the canonical copy meanwhile.
+  runas (Ada) {
+    var m = Message.Single();
+    Assert.Equal(0, Handed.Count());
+    Assert.Equal(null, m.Language);
+    Assert.Equal("Hej, jag har inte fått min beställning.", m.CanonicalText);
+    Assert.Equal(TextSource.Original, m.CanonicalSource);
+    Assert.Equal(LanguageWorkState.Queued, MessageLanguageWork.Single().State);
+  }
+  // …and right after it, it is.
+  Background.Settle();
+  runas (Ada) {
+    Assert.Equal(1, Handed.Count());
+    Assert.Equal(TextSource.Machine, Message.Single().CanonicalSource);
+    Assert.Equal(LanguageWorkState.Done, MessageLanguageWork.Single().State);
+  }
+}
+
+[Test(Desk)]
+void the_app_hears_the_language_a_customer_writes_in() {
+  runas (Inbox) { MailIn("ana@example.test", "<s1@example.test>", "Hej, jag har inte fått min beställning."); UnitOfWork.Commit(); }
+  Background.Settle();
+  runas (Ada) { Assert.Equal(1, Heard.Count(h => h.Says.EndsWith(" writes sv"))); }
+}
+
+[Test(Desk)]
+void a_translator_that_fails_is_tried_again_then_the_desk_is_told_and_the_reply_still_goes_out() {
+  runas (Inbox) { MailIn("ana@example.test", "<s1@example.test>", "Hej, jag har inte fått min beställning."); UnitOfWork.Commit(); }
+  Background.Settle();
+  runas (Ada) {
+    new TranslatorFails();
+    UnitOfWork.Commit();
+    Post(Conversation.Single(), "It left the warehouse this morning.");
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    var reply = Message.Single(m => m.Direction == MessageDirection.Outbound);
+    Assert.Equal(LanguageWorkState.Retrying, MessageLanguageWork.Single(w => w.Message == reply).State);
+    // Waiting for her rendering — not sent in English while a try is still due.
+    Assert.Equal(DeliveryState.AwaitingLanguage, MessageDelivery.Single().State);
+  }
+  // Two more tries, two minutes apart, and then the desk is told.
+  TestClock.Advance(TimeSpan.FromMinutes(3));
+  Background.Settle();
+  TestClock.Advance(TimeSpan.FromMinutes(3));
+  Background.Settle();
+  runas (Ada) {
+    var reply = Message.Single(m => m.Direction == MessageDirection.Outbound);
+    var work = MessageLanguageWork.Single(w => w.Message == reply);
+    Assert.Equal(LanguageWorkState.Unavailable, work.State);
+    Assert.Equal(3, work.Attempts);
+    Assert.Equal("The translator failed: the translation provider answered 503", work.Problem);
+    Assert.Equal(1, LanguageStatusOf(reply.Conversation.Id).Untranslated);
+    // An answer in the desk's language beats none: the reply went out as written.
+    Assert.Equal(DeliveryState.Sent, MessageDelivery.Single().State);
+    Assert.Equal("It left the warehouse this morning.", Carried.Single().Text);
+  }
+  // The provider is back: try again, and the rendering is made.
+  runas (Ada) {
+    TranslatorFails.Single().Delete();
+    UnitOfWork.Commit();
+    Assert.Equal(1, TranslateConversationAgain(Conversation.Single().Id));
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    Assert.Equal(LanguageWorkState.Done, MessageLanguageWork.Single(w => w.Message.Direction == MessageDirection.Outbound).State);
+    Assert.Equal("[sv] It left the warehouse this morning.", MessageText.Single().Text);
+    Assert.Equal(0, LanguageStatusOf(Conversation.Single().Id).Untranslated);
+  }
+}
+
+// ── the widget's own words ─────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Desk)]
+void the_widget_says_the_apps_own_words_and_the_kits_for_the_rest() {
+  var words = ChatWidgetWords();
+  Assert.Equal("Ask the shop anything — we answer within the hour.", words.Intro);
+  Assert.Equal("Chat with us", words.Title);
+  Assert.Equal("Start the conversation", words.Start);
+  // Replies follow by mail here, so the widget asks for an address and says why.
+  Assert.Equal("Leave your email and we will send our answer there if you have left by then.", words.MailNotice);
+}

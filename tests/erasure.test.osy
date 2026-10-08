@@ -1,0 +1,45 @@
+// Osysharp.Conversations — a person's export. ERASURE AND RETENTION are tested where they are decided: in
+// kits/privacy-conversations/tests, where a privacy request's plan (what is kept for legal claims, what is erased) and
+// the daily purge drive the copy register (model/Erasure.osy) — nothing here records an erasure, because nothing may.
+//
+// The desk (Ada), Cus, Dee and Eve are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+/// Ana writes by mail (Swedish, so her message gains a translated canonical copy) and in the chat, and the desk replies
+/// in English (so a Swedish rendering exists) — her words in every place the kit keeps words.
+void AnaEverywhere(string token) {
+  runas (Inbox) {
+    ReceiveInbound(new InboundMessage { ChannelKey = "email", Endpoint = "support@desk.test", From = "ana@example.test",
+                                        FromName = "Ana Lima", ExternalId = "<a1@example.test>", Subject = "Hej " + token,
+                                        Text = "Hej, jag har inte fått min beställning " + token + "." });
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+  runas (Ada) {
+    Post(Conversation.Single(c => c.Subject != null && c.Subject.Contains(token)), "It is on its way.");
+    UnitOfWork.Commit();
+  }
+  Background.Settle();
+}
+
+[Test(Desk)]
+void a_persons_export_holds_every_message_they_sent_and_were_sent() {
+  AnaEverywhere("LLAMA33");
+  runas (Ada) {
+    var c = Conversation.Single();
+    Post(c, "We also checked with the courier.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+    var export = ExportPartyData(Message.Single(m => m.Text.Contains("LLAMA33")).ByParty!);
+    Assert.Equal("Ana Lima", export.Name);
+    Assert.Contains("Email: ana@example.test", export.ContactPoints);
+    // Her message, and the reply as she received it (in Swedish) — never the note.
+    Assert.Equal(2, export.Messages.Count);
+    Assert.Equal("sent", export.Messages[0].Direction);
+    Assert.Equal("received", export.Messages[1].Direction);
+    Assert.Equal("[sv] It is on its way.", export.Messages[1].AsSent);
+    Assert.True(!ExportPartyDataAsJson(Message.Single(m => m.Text.Contains("LLAMA33")).ByParty!).Contains("courier"));
+  }
+}

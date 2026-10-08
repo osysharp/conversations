@@ -1,0 +1,15 @@
+app ConversationsKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Conversations@0;
+  use Osysharp.Collaboration@0;
+  use Osysharp.Workflow;
+  use Osysharp.Memory;
+  // A deterministic embedder, so the memory tests can search (`TestEmbedder.Use`).
+  use Osysharp.Memory.Testing@0;
+  use Osysharp.Ui;
+  // Files on messages (0.8.0) — the tests make them with `File.Create` as the person attaching.
+  use Osysharp.Storage;
+}
+

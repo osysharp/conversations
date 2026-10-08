@@ -1,0 +1,183 @@
+// Osysharp.Conversations 0.9.0 — FILES IN THE COMPOSER AND ON THE TIMELINE. A signed-out customer pastes a screenshot
+// into the widget; an agent sends an annotated one back; a source file is shown with its lines coloured; a pasted ```
+// snippet is code; what a mail client quoted is one click away. Read as the person each file is or is not for.
+//
+// The desk (Ada), Cus and Dee are in model.test.osy; the screenshot is a real PNG (model/screenshot.osy).
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using Osysharp.Storage;
+using ConversationsKitTests;
+
+/// A private upload by the caller, as the platform stores one, and the UploadedFile the page hands over for it.
+UploadedFile Uploaded(string name, byte[] bytes) {
+  var path = File.SaveUpload(name, bytes);
+  return new UploadedFile { Path = path, FileName = name, ContentType = "", Length = bytes.Length };
+}
+
+[Test(Desk)]
+void a_signed_out_customer_starts_with_a_pasted_screenshot_and_only_their_visit_sees_it() {
+  runas (new Visitor { Id = "visit-paste" }) {
+    var kept = KeepUpload(Uploaded("image.png", Screenshot()));
+    Assert.Equal(AttachmentKind.Image, kept.Kind);
+    StartFromWidget("The merge button looks wrong here.", "Eve", "", [kept.Id]);
+  }
+  runas (new Visitor { Id = "visit-paste" }) {
+    var attached = MessageAttachment.Single(a => a.Message.Text == "The merge button looks wrong here.");
+    Assert.Equal(AttachmentKind.Image, attached.Kind);
+    Assert.Equal("image/png", attached.ContentType);
+    Assert.True(FileAsset.Any(f => f.Id == attached.File.Id));
+  }
+  // Another browser reads neither the row nor the file; the desk reads both.
+  runas (new Visitor { Id = "visit-other" }) {
+    Assert.Equal(0, MessageAttachment.Count());
+    Assert.Equal(0, FileAsset.Count(f => f.Name == "image.png"));
+  }
+  runas (Ada) { Assert.Equal(1, MessageAttachment.Count(a => a.Message.Text == "The merge button looks wrong here.")); }
+}
+
+[Test(Desk)]
+void keeping_an_upload_takes_only_a_private_one_and_reads_what_it_is_from_its_bytes() {
+  runas (new Visitor { Id = "visit-keep" }) {
+    // A path the platform did not choose is not an upload of this caller's.
+    File.WriteAllBytes("public/logo.png", Screenshot());
+    Assert.Throws<ValidationException>(() => KeepUpload(new UploadedFile { Path = "public/logo.png", FileName = "logo.png", ContentType = "image/png", Length = 0 }));
+    // A name that lies about the bytes is refused, in a sentence.
+    var lie = Assert.Throws<ValidationException>(() => KeepUpload(Uploaded("invoice.png", Encoding.UTF8.GetBytes("not a picture"))));
+    Assert.Contains("invoice.png is named as a picture", lie.Message);
+    // Source code is kept as code.
+    var source = Uploaded("Export.cs", Encoding.UTF8.GetBytes("class Export { }\n"));
+    var code = KeepUpload(source);
+    Assert.Equal(AttachmentKind.Code, code.Kind);
+    // …and the upload itself is gone once kept.
+    Assert.False(File.Exists(source.Path));
+  }
+}
+
+[Test(Desk)]
+void an_upload_is_kept_only_by_the_browser_or_the_person_that_made_it() {
+  UploadedFile? pasted = null;
+  runas (new Visitor { Id = "visit-owner" }) { pasted = Uploaded("receipt.png", Screenshot()); }
+  // Another browser that learns the path — from a log, a shared screen — cannot attach it as its own…
+  runas (new Visitor { Id = "visit-other" }) {
+    var refused = Assert.Throws<ValidationException>(() => KeepUpload(pasted!));
+    Assert.Contains("upload it again", refused.Message);
+  }
+  // …nor can somebody signed in…
+  runas (Cus) { Assert.Throws<ValidationException>(() => KeepUpload(pasted!)); }
+  // …and a signed-in person's upload is theirs, not the desk's.
+  UploadedFile? theirs = null;
+  runas (Cus) { theirs = Uploaded("invoice.png", Screenshot()); }
+  runas (Ada) { Assert.Throws<ValidationException>(() => KeepUpload(theirs!)); }
+  // The browser and the person that made each one still keep it.
+  runas (new Visitor { Id = "visit-owner" }) { Assert.Equal(AttachmentKind.Image, KeepUpload(pasted!).Kind); }
+  runas (Cus) { Assert.Equal(AttachmentKind.Image, KeepUpload(theirs!).Kind); }
+}
+
+[Test(Desk)]
+void an_agent_sends_an_annotated_screenshot_back_and_a_note_s_file_stays_internal() {
+  Guid id = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Where do I click?");
+    UnitOfWork.Commit();
+    id = c.Id;
+    var shot = KeepUpload(Uploaded("where-to-click.png", Screenshot()));
+    var triage = KeepUpload(Uploaded("triage.png", Screenshot()));
+    ReplyFromDesk(id, "Here — the circled button.", false, [shot.Id]);
+    ReplyFromDesk(id, "Second time this week.", true, [triage.Id]);
+  }
+  runas (Cus) {
+    Assert.Equal(1, MessageAttachment.Count(a => a.Message.Conversation.Id == id));
+    Assert.Equal("where-to-click.png", MessageAttachment.Single(a => a.Message.Conversation.Id == id).FileName);
+    Assert.Equal(0, FileAsset.Count(f => f.Name == "triage.png"));
+  }
+}
+
+[Test(Desk)]
+void a_code_file_is_previewed_with_its_lines_coloured() {
+  Guid attachmentId = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Crash");
+    UnitOfWork.Commit();
+    var src = KeepUpload(Uploaded("Export.cs",
+      Encoding.UTF8.GetBytes("// exports the month\npublic class Export {\n  int total = 42;\n  string name = \"march\";\n}\n")));
+    var m = ReplyFromDesk(c.Id, "The file:", false, [src.Id]);
+    attachmentId = MessageAttachment.Single(a => a.Message.Id == m.Id).Id;
+  }
+  runas (Cus) {
+    var preview = PreviewOf(attachmentId);
+    Assert.Equal(5, preview.Lines.Count);
+    Assert.Equal(CodeTokenKind.Comment, preview.Lines[0].Tokens[0].Kind);
+    Assert.Equal("public", preview.Lines[1].Tokens[0].Text);
+    Assert.Equal(CodeTokenKind.Keyword, preview.Lines[1].Tokens[0].Kind);
+    Assert.True(preview.Lines[1].Tokens.Any(t => t.Text == "Export" && t.Kind == CodeTokenKind.Type));
+    Assert.True(preview.Lines[2].Tokens.Any(t => t.Text == "42" && t.Kind == CodeTokenKind.Number));
+    Assert.True(preview.Lines[3].Tokens.Any(t => t.Text == "\"march\"" && t.Kind == CodeTokenKind.String));
+  }
+  // Another customer previews nothing — the rules decide, not the preview.
+  runas (Dee) { Assert.Equal(0, PreviewOf(attachmentId).Lines.Count); }
+}
+
+[Test]
+void a_fenced_snippet_is_code_and_the_prose_around_it_is_not() {
+  var segments = SegmentsOf("It fails on this line:\n```cs\nvar x = items[0];\n```\nAny idea?");
+  Assert.Equal(3, segments.Count);
+  Assert.False(segments[0].Code);
+  Assert.True(segments[1].Code);
+  Assert.Equal("csharp", segments[1].Language);
+  Assert.Equal("var x = items[0];", segments[1].Text);
+  Assert.Equal("Any idea?", segments[2].Text);
+  // An unclosed fence runs to the end — a half-pasted snippet is still code.
+  Assert.True(SegmentsOf("```\nSELECT 1").Last().Code);
+  // A block comment carried across lines stays a comment.
+  var lines = Highlight("a /* one\ntwo */ b", "csharp");
+  Assert.Equal(CodeTokenKind.Comment, lines[1].Tokens[0].Kind);
+}
+
+// ── the pages ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Desk)]
+void the_widget_takes_a_dropped_file_with_the_first_message() {
+  Ui.Visit("/chat");
+  Ui.Fill("Your message", "It crashes in this file.");
+  Ui.Upload("Your message", "Export.cs", "public class Export {\n  void Run() { throw null; }\n}\n");
+  Assert.Visible("Export.cs");
+  Ui.Click("Start the conversation");
+  Assert.Visible("It crashes in this file.");
+  // The file is on the message, its first lines coloured beneath its name.
+  Assert.Visible("throw");
+  Ui.Shot("widget-code-file");
+}
+
+[Test(Desk)]
+void the_desk_thread_shows_a_screenshot_code_and_quoted_text() {
+  Guid id = Guid.Empty;
+  runas (new Visitor { Id = "visit-thread" }) {
+    var shot = KeepUpload(Uploaded("looks-wrong.png", Screenshot()));
+    id = StartFromWidget("The merged card shows two addresses — see the screenshot.\n```ts\nconst total = rows.reduce((a, r) => a + r.sum, 0);\n```", "Eve", "", [shot.Id]);
+  }
+  runas (Ada) {
+    var src = KeepUpload(Uploaded("Merge.cs",
+      Encoding.UTF8.GetBytes("// keeps both addresses after a merge\npublic Party Merge(Party a, Party b) {\n  b.MergedInto = a;\n  return a;\n}\n")));
+    ReplyFromDesk(id, "Thanks — here is where it happens.", false, [src.Id]);
+  }
+  Ui.SignInAs(Ada);
+  Ui.Visit($"/desk/{id}/thread");
+  Assert.Visible("looks-wrong.png");
+  Assert.Visible("Merge.cs");
+  Assert.Visible("total = rows.reduce((a, r) => a + r.sum,");
+  Ui.Shot("desk-thread-files");
+  Ui.Click("Open looks-wrong.png");
+  Assert.Visible("Download looks-wrong.png");
+  Ui.Shot("desk-lightbox");
+  Ui.Press("Escape");
+
+  // Dark, and on a phone: every colour is a token, and code scrolls sideways rather than breaking the card.
+  Ui.Click("Switch theme");
+  Assert.Visible("Merge.cs");
+  Ui.Shot("desk-thread-files-dark");
+  Ui.Viewport(390);
+  Ui.Shot("desk-thread-files-phone-dark");
+  Ui.Click("Switch theme");
+  Ui.Shot("desk-thread-files-phone");
+}

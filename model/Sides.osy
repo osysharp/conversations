@@ -1,0 +1,219 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+
+// ── side conversations ────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A conversation the desk starts BESIDE another one, about it: mail to somebody outside — a supplier, a carrier, the
+// customer's accountant — or a thread inside the team. It is a conversation of its own (its own seats, its own thread
+// ids, its own subject), so everything a conversation does it does: the other side's answer by mail continues it and
+// nothing else, their language is answered in, their words are scrubbed at rest. What makes it a SIDE conversation is
+// `SideOf`, and two lines on the conversation it is beside: that it was started, and each time the other side answers.
+//
+// ⚑ THE OTHER SIDE NEVER SEES THE CONVERSATION IT IS BESIDE. They are seated in the side conversation alone; their mail
+//   carries its subject and its thread ids, never the first conversation's reference or ids; and `SideOf` is masked from
+//   everybody who is not staff (SECURITY-INVARIANT a-side-conversation-never-shows-its-parent). The reverse holds by the
+//   same rule: the customer of the first conversation is not seated in the side one, so they never read it, and the lines
+//   about it on their conversation are internal.
+
+/// Start a side conversation beside `parent`: with `with` — somebody outside, mailed `text` under `subject` — or, with
+/// no one, a thread inside the team, `text` its first note. The caller takes a staff seat; `with` the seat of the person
+/// it is with. `parent`'s timeline says so (internal), and the side conversation is answered. Committed — its seats are
+/// what its first message is delivered by.
+public Conversation StartSideConversation(Conversation parent, string subject, string text, Party? with = null,
+                                          List<FileAsset>? files = null) {
+  var about = subject.Trim();
+  var said = text.Trim();
+  if (parent.SideOf != null) {
+    throw new ValidationException("Start a side conversation from the conversation itself, not from another side conversation.");
+  }
+  if (about == "") { throw new ValidationException("Give the side conversation a subject — the other side reads it as the mail's subject."); }
+  if (said == "" && (files == null || files.Count == 0)) {
+    throw new ValidationException("Write what you want to ask — a side conversation starts with a message.");
+  }
+  Party? other = with == null ? null : Survivor(with!);
+  if (other != null) {
+    if (Participant.Any(p => p.Conversation == parent && p.Party == other && p.LeftAt == null)) {
+      throw new ValidationException($"{NameOf(other!)} is on this conversation already — write to them here.");
+    }
+    if (ReachOn(other!, ContactPointKind.Email) == null) {
+      throw new ValidationException($"{NameOf(other!)} has no address to mail — give one.");
+    }
+  }
+  var now = DateTime.UtcNow;
+  var side = new Conversation {
+    Subject = about, StartedAt = now, SideOf = parent, IsSide = true, ReplyChannel = other == null ? "web" : "email",
+  };
+  var me = Session.CurrentUser;
+  if (me != null) { new Participant { Conversation = side, Member = me, Role = ParticipantRole.Staff, JoinedAt = now }; }
+  // SECURITY-INVARIANT(a-side-conversation-never-shows-its-parent): the person it is with is seated HERE, and only here.
+  if (other != null) { new Participant { Conversation = side, Party = other!, Role = ParticipantRole.Customer, JoinedAt = now }; }
+  Record(parent, "conversations.side-started", "Osysharp.Conversations", person: other == null ? "" : other!.DisplayName,
+         personParty: other, side: side).Detail = about;
+  // The seats first: the first message is delivered to whoever is seated when it is written.
+  UnitOfWork.Commit();
+  Post(side, said, other == null ? EntryVisibility.Internal : EntryVisibility.Customer,
+       channelKey: other == null ? null : "email", files: files);
+  return side;
+}
+
+// ── an answer written on the WEB: told on the conversation it is beside, by the kit's run ─────────────────────────────
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum SideAnswerState { Noting, Noted }
+
+/// One answer the other side of a side conversation WROTE ON THE WEB (signed in, not by mail) — what asks the kit's run
+/// to say so on the conversation it is beside. The writer makes it with their message; they read nothing through it, and
+/// it is the run (the system), never them, that touches the other conversation.
+///
+/// SECURITY-INVARIANT(a-web-side-answer-is-noted-by-the-desk-not-the-writer): an answer on the web in a side conversation
+/// is told on the conversation it is beside — a line on its timeline, the side conversation opened again, the app told
+/// (`ConversationEvents.SideAnswered`) — by `SideAnswerNoting`, the kit's run; the writer only makes this row about their
+/// own message, and still reads nothing of the other conversation (`a-side-conversation-never-shows-its-parent`).
+/// Guarded by tests/sides.test.osy `an_answer_on_the_web_is_told_on_the_conversation_beside_by_the_desk_and_the_writer_still_sees_none_of_it`.
+public entity SideAnswerNote {
+  [Required] Message Message;
+  SideAnswerState State;                                  // no default — SideAnswerNoting owns it
+
+  security {
+    // Made by whoever writes the answer — the other side, in their own conversation — or by the desk taking one down.
+    allow create when IsConversationStaff;
+    allow create when IsConversationCustomer where IsCustomerIn(Message.Conversation.Id);
+    // The plumbing is the desk's to read.
+    allow read when IsConversationStaff;
+    deny update Message;
+  }
+}
+
+/// Says a web answer on the conversation it is beside — as the kit's run, which may read both.
+public workflow SideAnswerNoting {
+  Tracks    = SideAnswerNote.State;
+  Autostart = true;
+  Initial   = Noting;
+
+  state Noting {
+    enter {
+      var m = this.Item.Message;
+      var side = m.Conversation;
+      if (side.SideOf != null && m.ByParty != null) { NoteSideAnswer(side, m.ByParty!); }
+      goto Noted;
+    }
+  }
+  terminal success Noted { }
+}
+
+/// The other side answered in `side` (by mail, or on the web): it is open again, the conversation it is beside says so —
+/// for the desk — and the app is told (`ConversationEvents.SideAnswered`). One place for both, so a web answer and a
+/// mailed one read the same on the desk.
+internal void NoteSideAnswer(Conversation side, Party by) {
+  side.SideClosedAt = null;
+  var told = Record(side.SideOf!, "conversations.side-replied", "Osysharp.Conversations", person: by.DisplayName,
+                    personParty: by, side: side);
+  told.Detail = side.Subject ?? "";
+  App.Setting<ConversationsSetup>().Events.SideAnswered(side);
+}
+
+/// Set a side conversation aside as done — or bring it back. The next message in it brings it back by itself.
+public void SetSideDone(Conversation side, bool done) {
+  if (side.SideOf == null) { throw new ValidationException("Only a side conversation is set aside — this is a conversation of its own."); }
+  side.SideClosedAt = done ? DateTime.UtcNow : null;
+}
+
+/// One side conversation, as the conversation it is beside lists it.
+public class SideConversationLine {
+  public Guid Id;
+  public string Subject = "";
+  /// Who it is with — "" for a thread inside the team.
+  public string With = "";
+  /// …and where they are mailed.
+  public string Address = "";
+  public bool InsideTheTeam;
+  public int Messages;
+  public DateTime? StartedAt;
+  public DateTime? LastAt;
+  /// The other side wrote last — the desk owes them an answer.
+  public bool TheirTurn;
+  /// The newest message, its first line.
+  public string Last = "";
+  public string LastBy = "";
+  /// Set aside as done.
+  public bool Done;
+  /// What went wrong delivering the newest message the desk sent — a bounce, an address that cannot be mailed. "" when
+  /// nothing did.
+  public string Problem = "";
+}
+
+/// The side conversations beside `parentId`, newest first — one read of them, their seats, their newest messages and
+/// their deliveries. What a desk lists beside a conversation, and what each line of its timeline opens.
+public List<SideConversationLine> SideConversationsOf(Guid parentId) {
+  List<SideConversationLine> lines = [];
+  var sides = Conversation.Where(c => c.SideOf != null && c.SideOf.Id == parentId).OrderByDescending(c => c.StartedAt)
+    .Take(50).ToList();
+  foreach (var s in sides) { lines.Add(SideLine(s)); }
+  return lines;
+}
+
+/// One side conversation as a line — `SideConversationsOf`'s, for one.
+public SideConversationLine SideConversationLineOf(Guid sideId) {
+  var s = Conversation.FirstOrDefault(c => c.Id == sideId && c.SideOf != null);
+  if (s == null) { return new SideConversationLine(); }
+  return SideLine(s!);
+}
+
+SideConversationLine SideLine(Conversation s) {
+  var seat = Participant.Where(p => p.Conversation == s && p.Party != null && p.Role == ParticipantRole.Customer)
+    .Include(p => p.Party).FirstOrDefault();
+  var address = seat == null ? null : ReachOn(seat.Party!, ContactPointKind.Email);
+  var newest = Message.Where(m => m.Conversation == s).OrderByDescending(m => m.Sequence).FirstOrDefault();
+  var sent = Message.Where(m => m.Conversation == s && m.Direction == MessageDirection.Outbound)
+    .OrderByDescending(m => m.Sequence).FirstOrDefault();
+  var problem = "";
+  if (sent != null) {
+    var d = MessageDelivery.Where(x => x.Message == sent && x.CarriedIn == null).OrderByDescending(x => x.CreatedAt).FirstOrDefault();
+    if (d != null && (d.State == DeliveryState.Held || d.Outcome == DeliveryOutcome.Failed)) {
+      problem = d.Problem ?? (d.Outcome == DeliveryOutcome.Failed ? "The mail did not arrive." : "Not sent.");
+    }
+  }
+  return new SideConversationLine {
+    Id = s.Id, Subject = s.Subject ?? "", With = seat == null ? "" : NameOf(seat.Party!), Address = address == null ? "" : address.Value,
+    InsideTheTeam = seat == null, Messages = Message.Count(m => m.Conversation == s), StartedAt = s.StartedAt, LastAt = s.LastEntryAt,
+    TheirTurn = newest != null && newest.Direction == MessageDirection.Inbound,
+    Last = newest == null ? "" : FirstLineOf(newest.Text), LastBy = newest == null ? "" : newest.ByName,
+    Done = s.SideClosedAt != null, Problem = problem,
+  };
+}
+
+/// A text's first line, cut to 140 characters.
+public string FirstLineOf(string text) {
+  var line = text.Trim().Split("\n")[0].Trim();
+  return line.Length > 140 ? line.Substring(0, 137) + "…" : line;
+}
+
+// ── the desk's hands on them: by id, and committed ─────────────────────────────────────────────────────────────────
+
+/// The desk starts a side conversation beside `parentId` — with somebody outside, at `address` (the party already
+/// reached there, else a new one of the app's kind), or inside the team when `address` is empty. Answers its id.
+/// Committed.
+public Guid StartSideConversationTo(Guid parentId, string address, string subject, string text, string name = "",
+                                    List<Guid>? fileIds = null) {
+  var parent = Conversation.Single(c => c.Id == parentId);
+  Party? with = null;
+  var a = address.Trim().ToLower();
+  if (a != "") {
+    var at = a.IndexOf("@");
+    if (at < 1 || at == a.Length - 1 || a.Contains(" ")) {
+      throw new ValidationException("Give the address to write to — like orders@supplier.example.");
+    }
+    with = PartyReachedBy(ContactPointKind.Email, a, name);
+  }
+  var side = StartSideConversation(parent, subject, text, with, OwnFiles(fileIds));
+  UnitOfWork.Commit();
+  return side.Id;
+}
+
+/// The desk sets a side conversation aside as done, or brings it back. Committed.
+public void SetSideDoneById(Guid sideId, bool done) {
+  SetSideDone(Conversation.Single(c => c.Id == sideId), done);
+  UnitOfWork.Commit();
+}

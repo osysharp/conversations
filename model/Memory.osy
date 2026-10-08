@@ -1,0 +1,53 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Memory;
+
+// ── memory ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Every message's canonical copy is in the app's shared corpus (`[Searchable(Memory)] Message.CanonicalText`): ONE
+// language, already redacted, so a search, a draft, "similar conversations" and trend detection all read the same index
+// whatever language each conversation was held in. Memory is reached only through a row the searcher may read — a
+// customer's search never surfaces a note, because a customer cannot read the note.
+//
+// ⚑ AN EMBEDDER IS THE APP'S (`app.Embedding`). With none, a message still writes — its copy is in the corpus waiting —
+//   and search is unavailable until one is set up.
+
+/// One conversation a search found, with the passage that matched.
+public class ConversationHit {
+  public Guid Conversation;
+  public string Subject = "";
+  public string Passage = "";
+  public decimal Score;
+}
+
+/// Conversations about `query`, by meaning — the best passage of each, best first, at most `limit`. Only what the
+/// caller may read is ever found.
+public List<ConversationHit> SearchConversations(string query, int limit = 10) {
+  return ByConversation(Memory.Search(query, of: [Osysharp.Conversations.Message], limit: limit * 4), limit, null);
+}
+
+/// Conversations that read like `conversation` — what its customer recently wrote, searched across every other
+/// conversation and every channel. The desk's "we have seen this before".
+public List<ConversationHit> SimilarConversations(Conversation conversation, int limit = 5) {
+  var recent = Message.Where(m => m.Conversation == conversation && m.Direction == MessageDirection.Inbound
+      && m.CanonicalText != null).OrderByDescending(m => m.Sequence).Take(3).ToList();
+  var query = string.Join("\n", recent.Select(m => m.CanonicalText ?? ""));
+  if (query.Trim() == "") { return []; }
+  return ByConversation(Memory.Search(query, of: [Osysharp.Conversations.Message], limit: limit * 4), limit, conversation.Id);
+}
+
+/// One hit per conversation (its best), at most `limit`, never `except`.
+List<ConversationHit> ByConversation(List<SearchHit> hits, int limit, Guid? except) {
+  List<ConversationHit> found = [];
+  foreach (var hit in hits) {
+    var message = Message.FirstOrDefault(m => m.Id == hit.SourceEntityId);
+    if (message == null) { continue; }
+    var id = message.Conversation.Id;
+    if (except != null && id == except) { continue; }
+    if (found.Any(f => f.Conversation == id)) { continue; }
+    found.Add(new ConversationHit { Conversation = id, Subject = message.Conversation.Subject ?? "", Passage = hit.Content,
+                                    Score = hit.Score });
+    if (found.Count >= limit) { break; }
+  }
+  return found;
+}

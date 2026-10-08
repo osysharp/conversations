@@ -1,0 +1,414 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+// ── erasure and export: the copy register, walked by the kit's own run ─────────────────────────────────────────────
+//
+// What a person's data is in this kit, and every place a copy of it lands — the COPY REGISTER:
+//
+//   their messages' original text and body     → "[erased]" (the entry stays, so the timeline keeps its shape)
+//   the original as it arrived (a mail)        → deleted — it IS their message, with their address on it
+//   the canonical copy (and memory derived from it) → removed
+//   renderings of their messages               → deleted
+//   the subject of a conversation they started → removed
+//   files on their messages                    → deleted ONLY when marked about them (`MessageAttachment.About`)
+//   their contact points, name and language    → deleted / blanked; the app's own fields → `PartyKinds.Erase`
+//   the name shown on every entry they wrote   → blanked (`ConversationEntry.ByName`)
+//   what a CHANNEL keeps (the mail or text outbox) → the channel's `EraseCopiesTo(address)`
+//   what the DESK wrote about them in a side conversation beside theirs (to a supplier, a carrier) → "[erased]", with its
+//   renderings, files, subject and the channel's copy of it (`EraseCopyOf`) — the other side's words stay
+//
+// ⚑ WHAT IS ERASED, AND WHEN, IS NOT DECIDED HERE. A person's request goes through `Osysharp.Privacy`, whose plan says,
+//   category by category, what may be erased and what must be kept (a complaint is kept for legal claims — D-PRIVACY1);
+//   `Osysharp.Privacy.Conversations` is this kit's holder, and it RECORDS a `PartyErasure` for each part the plan erases
+//   — and one per conversation whose period ended. This kit's run does the writes: history is fixed for every caller,
+//   and erasure is the one thing that may rewrite it. Nobody records an erasure directly — not staff, not the app —
+//   because an erasure that bypasses the plan is how a kept complaint used to be erased.
+//
+// ⚑ A FILE IS ERASED BECAUSE IT IS ABOUT THE PERSON, NEVER BECAUSE THEY SENT IT (owner, Privacy Q7). A document a
+//   customer attached may be their company's, or somebody else's; a file goes with a person's erasure only when it is
+//   marked about them (`MarkFileAbout`). A conversation that reaches the end of its period takes all of its files: that
+//   is the conversation's period, not an inference about whose a file is.
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum ErasureState {
+  [Label("Erased")] Erased,
+}
+
+/// What one erasure reaches. ⚠ Appended, never inserted: an enum is stored by position.
+public enum ErasureReach {
+  /// The party's words — in `Conversation` alone when it is set, else in every conversation they were in: their
+  /// messages, the originals, renderings, the subjects of the conversations they started, and the files marked about
+  /// them.
+  [Label("Their words")] Words,
+  /// The redacted copies of their words in the desk's language (`Message.CanonicalText`), and the memory derived from
+  /// them — what search and "similar conversations" read.
+  [Label("Copies used to improve support")] CanonicalCopies,
+  /// Who they are: their contact points (and every copy a channel keeps of what was sent to them), their name, their
+  /// language, and the app's own fields (`PartyKinds.Erase`).
+  [Label("Who they are")] Identity,
+  /// A whole conversation that reached the end of its period — every entry's words, every file, the subject.
+  [Label("A conversation past its period")] Conversation,
+  /// What the DESK wrote in the side conversations beside `Conversation` (a supplier asked about the customer's order):
+  /// its messages and notes, their renderings, files and the copies the channel sent, the side conversations' subjects,
+  /// and the subject the parent's "side conversation started" line repeats. The other side's own words are theirs, and
+  /// stay.
+  [Label("What the desk wrote about them beside")] DeskWordsBeside,
+}
+
+/// Why an erasure ran. ⚠ Appended, never inserted: an enum is stored by position.
+public enum ErasureCause {
+  /// The person asked.
+  [Label("On their request")] Request,
+  /// The conversation's period ended.
+  [Label("Its period ended")] PeriodEnded,
+  /// It was kept for legal claims, and that period ended.
+  [Label("Kept for legal claims until its period ended")] ClaimsPeriodEnded,
+  /// They asked earlier; who they are was kept with a conversation for legal claims, and is erased now that it ended.
+  [Label("Kept for legal claims, erased when that ended, as they asked")] AskedWhileKept,
+}
+
+/// One erasure — what it reached, when, and why. Recorded by `Osysharp.Privacy.Conversations` as a request's plan runs,
+/// or as the daily purge ends a conversation's period; the kit's run (`PartyErasing`) does the writes. Kept as the
+/// record of what each erasure reached.
+[Authority(Extensible)]
+public entity PartyErasure {
+  /// Whose — empty when a conversation's period ended (nobody asked; its time was up).
+  Party? Party;
+  /// Only this conversation — empty for every conversation the party was in.
+  Conversation? Conversation;
+  ErasureReach Reach;
+  [Required] DateTime At;
+  /// Why — a fact, said in the reader's language wherever it is shown (the timeline's line for it).
+  ErasureCause Cause = ErasureCause.Request;
+  /// What it reached — counts, the record of the copy register having been walked.
+  int MessagesErased;
+  int RenderingsDeleted;
+  int PointsDeleted;
+  /// Files and originals deleted.
+  int FilesDeleted;
+  ErasureState State;                                     // no default — PartyErasing owns it
+
+  security {
+    deny read when !IsConversationStaff;
+    // SECURITY-INVARIANT(conversations-an-erasure-follows-the-plan): nobody — staff, an admin, the app's own code —
+    // records an erasure. Only a workflow run does: `Osysharp.Privacy`'s request run (after its plan decided what is
+    // kept for legal claims) and its daily purge. An erasure recorded directly bypassed the plan, which is how a
+    // complaint the company must keep used to be erased. Guarded by kits/privacy-conversations/tests
+    // `nobody_erases_a_customer_except_through_a_privacy_request`.
+    deny create;
+    deny update;
+    deny delete;
+  }
+}
+
+// SECURITY-INVARIANT(erasure-reaches-every-copy): erasing a person's words reaches EVERY copy the kit and its channels
+// keep — originals, canonical copies, renderings, subjects, the files marked about them, contact points, the name each
+// of their entries was signed with, the app's own fields (`PartyKinds.Erase`) and each channel's outbox (`IConversationChannel.EraseCopiesTo`). Failure mode: an erasure
+// that blanks the message and leaves its translated copy, its rendering or the mail that carried it. Guarded by
+// kits/privacy-conversations/tests `an_erased_customer_with_no_complaint_leaves_no_trace_at_once` (`Assert.NoTraceOf`, her
+// words and her name) and `the_purge_lifts_the_complaint_on_its_day_and_erases_it_and_her`.
+/// Does an erasure the moment it is recorded.
+public workflow PartyErasing {
+  Tracks    = PartyErasure.State;
+  Autostart = true;
+  Initial   = Erased;
+
+  state Erased {
+    enter {
+      var e = this.Item;
+      if (e.Reach == ErasureReach.Conversation) { ExpireConversation(e); }
+      else if (e.Reach == ErasureReach.CanonicalCopies) { EraseCanonicalCopies(e); }
+      else if (e.Reach == ErasureReach.Identity) { EraseIdentity(e); }
+      else if (e.Reach == ErasureReach.DeskWordsBeside) { EraseDeskWordsBeside(e); }
+      else { EraseWords(e); }
+    }
+  }
+}
+
+/// The conversations `party` was in — only `only` when it is set. Read as conversations, not through the seats: a
+/// conversation KEPT RESTRICTED (for legal claims, `Osysharp.Privacy.Conversations`) is absent from every ordinary read
+/// and so from this answer, while a seat still names it; inside a purpose read for its category it is here.
+[SuppressWarning("cost-unbounded-read")]   // one person's conversations, and an erasure must reach every one
+public List<Conversation> ConversationsOfParty(Party party, Conversation? only) {
+  List<Guid> ids = [];
+  foreach (var seat in Participant.Where(p => p.Party == party).ToList()) {
+    var id = seat.Conversation.Id;
+    if (only != null && id != only!.Id) { continue; }
+    if (!ids.Contains(id)) { ids.Add(id); }
+  }
+  if (ids.Count == 0) { return []; }
+  return Conversation.Where(c => ids.Contains(c.Id)).ToList();
+}
+
+// Their words, in the erasure's conversations.
+[SuppressWarning("cost-unbounded-read")]   // an erasure must reach everything one person wrote
+internal void EraseWords(PartyErasure e) {
+  var party = e.Party!;
+  var theirs = ConversationsOfParty(party, e.Conversation);
+  var messages = 0;
+  var renderings = 0;
+  foreach (var c in theirs) {
+    // A conversation they STARTED carries their words in its subject.
+    if (Participant.Any(s => s.Conversation == c && s.Party == party && s.Role == ParticipantRole.Customer) && c.Subject != null) {
+      c.Subject = null;
+    }
+    var here = 0;
+    foreach (var m in Message.Where(m => m.ByParty == party && m.Conversation == c).ToList()) {
+      foreach (var r in MessageText.Where(r => r.Message == m).ToList()) { r.Delete(); renderings = renderings + 1; }
+      m.Text = Erased();
+      m.QuotedText = null;
+      m.CanonicalText = null;
+      m.Language = null;
+      m.AlsoTo = null;
+      e.FilesDeleted = e.FilesDeleted + EraseFilesAbout(m, party);
+      here = here + 1;
+    }
+    messages = messages + here;
+    // …and the name each of their entries was signed with: who they are may be kept elsewhere (with a complaint, for
+    // legal claims) — restricted there, never left readable here.
+    foreach (var entry in ConversationEntry.Where(x => x.Conversation == c && x.ByParty == party && x.ByName != "").ToList()) {
+      entry.ByName = "";
+    }
+    // The facts: how many messages, and why — said in the reader's language when the timeline is read.
+    var erased = Record(c, "conversations.party-erased", "Osysharp.Conversations");
+    erased.Count = here;
+    erased.Cause = e.Cause;
+  }
+  e.MessagesErased = messages;
+  e.RenderingsDeleted = renderings;
+}
+
+// SECURITY-INVARIANT(erasure-blanks-the-desks-words-beside): erasing a person's conversation also blanks what the DESK
+// wrote about them in the side conversations beside it — every desk message and note there, its renderings, files and
+// the copy the channel sent (`EraseCopyOf`), the side conversations' subjects and the subject the parent's line repeats —
+// while the other side's own words stay theirs. Failure mode: the customer is erased, and "her order 4471 to Elm Street
+// never arrived" survives in the mail the desk sent a carrier. Guarded by kits/privacy-conversations/tests
+// `an_erasure_blanks_what_the_desk_wrote_about_her_in_a_side_conversation_and_keeps_the_suppliers_words`.
+[SuppressWarning("cost-unbounded-read")]   // one conversation's side conversations, and an erasure must reach every word in them
+internal void EraseDeskWordsBeside(PartyErasure e) {
+  var parent = e.Conversation!;
+  var messages = 0;
+  List<Conversation> sides = Conversation.Where(c => c.SideOf != null && c.SideOf.Id == parent.Id).ToList();
+  foreach (var side in sides) {
+    foreach (var m in Message.Where(m => m.Conversation == side && m.ByParty == null).ToList()) {
+      foreach (var r in MessageText.Where(r => r.Message == m).ToList()) { r.Delete(); e.RenderingsDeleted = e.RenderingsDeleted + 1; }
+      // The copy the channel sent (the mail in its outbox) carries the same words.
+      foreach (var d in MessageDelivery.Where(d => d.Message == m && d.ExternalId != null).ToList()) {
+        var channel = ChannelFor(d.ChannelKey);
+        if (channel != null) { channel!.EraseCopyOf(d.ExternalId!); }
+      }
+      m.Text = Erased();
+      m.QuotedText = null;
+      m.CanonicalText = null;
+      e.FilesDeleted = e.FilesDeleted + EraseFilesOf(m);
+      messages = messages + 1;
+    }
+    side.Subject = null;
+    var erased = Record(side, "conversations.party-erased", "Osysharp.Conversations");
+    erased.Count = messages;
+    erased.Cause = e.Cause;
+  }
+  // The parent's "side conversation started" line repeats the side's subject.
+  foreach (var ev in ConversationEvent.Where(ev => ev.Conversation == parent && ev.Side != null && ev.Detail != "").ToList()) {
+    ev.Detail = "";
+  }
+  e.MessagesErased = messages;
+}
+
+// The redacted copies of their words — what search and similar conversations read.
+[SuppressWarning("cost-unbounded-read")]   // an erasure must reach everything one person wrote
+internal void EraseCanonicalCopies(PartyErasure e) {
+  var party = e.Party!;
+  var n = 0;
+  foreach (var c in ConversationsOfParty(party, e.Conversation)) {
+    foreach (var m in Message.Where(m => m.ByParty == party && m.Conversation == c && m.CanonicalText != null).ToList()) {
+      m.CanonicalText = null;
+      n = n + 1;
+    }
+  }
+  e.MessagesErased = n;
+}
+
+// Who they are: every way to reach them (and what each channel keeps of what was sent there), their name, their
+// language and the app's own fields. The party row stays, so the conversations they took part in keep an author.
+[SuppressWarning("cost-unbounded-read")]   // an erasure must reach everything that names one person
+internal void EraseIdentity(PartyErasure e) {
+  var party = e.Party!;
+  var setup = App.Setting<ConversationsSetup>();
+  // Every party merged INTO this one is the same person — a browser that proved this address, a second record the desk
+  // merged — and kept its own points as a tombstone: they go too. (Measured: a self-service erasure left the visitor
+  // party's own point, holding the address, behind its merge.)
+  List<Party> people = [party];
+  for (var i = 0; i < people.Count; i++) {
+    foreach (var a in Party.Where(p => p.MergedInto == people[i]).ToList()) {
+      if (!people.Any(x => x.Id == a.Id)) { people.Add(a); }
+    }
+  }
+  var points = 0;
+  foreach (var who in people) {
+    foreach (var p in ContactPoint.Where(p => p.Party == who).ToList()) {
+      if (p.Kind != ContactPointKind.Visitor) {
+        foreach (var channel in setup.Channels) {
+          if (channel.Reaches == p.Kind) { channel.EraseCopiesTo(p.Value); }
+        }
+        // The conversations' own delivery records name the address each reply went to.
+        foreach (var d in MessageDelivery.Where(d => d.To == p.Value).ToList()) { d.To = null; }
+      }
+      p.Delete();
+      points = points + 1;
+    }
+    // A merge says why it was made — "Proved ann@x.com with a code" — and that sentence names them.
+    foreach (var m in PartyMerge.Where(m => m.Kept == who || m.Absorbed == who).ToList()) { m.Reason = ""; }
+    // Every entry they wrote shows their name as it was then — a copy of who they are.
+    foreach (var entry in ConversationEntry.Where(x => x.ByParty == who && x.ByName != "").ToList()) { entry.ByName = ""; }
+    // …and every event that NAMES them (a merge of their records) keeps their name as a fact — a copy too.
+    foreach (var ev in ConversationEvent.Where(x => x.PersonParty == who && x.Person != "").ToList()) { ev.Person = ""; }
+    foreach (var ev in ConversationEvent.Where(x => x.OtherParty == who && x.OtherPerson != "").ToList()) { ev.OtherPerson = ""; }
+    setup.Parties.Erase(who);
+    who.DisplayName = "";
+    who.Language = null;
+    who.ErasedAt = DateTime.UtcNow;
+  }
+  e.PointsDeleted = points;
+}
+
+// A conversation whose period ended: every entry's words, every file, the subject — its shape and an event kept.
+[SuppressWarning("cost-unbounded-read")]   // one conversation, and its expiry must reach every entry of it
+internal void ExpireConversation(PartyErasure e) {
+  var c = e.Conversation!;
+  var messages = 0;
+  foreach (var m in Message.Where(m => m.Conversation == c).ToList()) {
+    foreach (var r in MessageText.Where(r => r.Message == m).ToList()) { r.Delete(); e.RenderingsDeleted = e.RenderingsDeleted + 1; }
+    m.Text = Erased();
+    m.QuotedText = null;
+    m.CanonicalText = null;
+    m.AlsoTo = null;
+    e.FilesDeleted = e.FilesDeleted + EraseFilesOf(m);
+    messages = messages + 1;
+  }
+  // Its events keep their place and kind, and lose every fact that could say who or what: each reads as erased.
+  foreach (var ev in ConversationEvent.Where(ev => ev.Conversation == c).ToList()) {
+    ev.Erased = true;
+    ev.Person = "";
+    ev.OtherPerson = "";
+    ev.Detail = "";
+    ev.Facts = null;
+  }
+  // The names its customers wrote under — the desk's own staff keep theirs: a colleague's name is not the customer's.
+  foreach (var entry in ConversationEntry.Where(x => x.Conversation == c && x.ByParty != null && x.ByName != "").ToList()) {
+    entry.ByName = "";
+  }
+  c.Subject = null;
+  e.MessagesErased = messages;
+  var expired = Record(c, "conversations.retention-erased", "Osysharp.Conversations");
+  expired.Cause = e.Cause;
+}
+
+/// Whether a conversation's period already ended — its words are gone, and the purge passes it by.
+public bool IsExpired(Conversation c) {
+  return PartyErasure.Any(e => e.Conversation == c && e.Reach == ErasureReach.Conversation);
+}
+
+/// What erased text reads as.
+public string Erased() { return "[erased]"; }
+
+/// Delete a message's files and its original — the rows AND the stored bytes (deleting a file deletes every version of
+/// it). Answers how many files went. For a conversation whose period ended: all of its files go with it.
+[SuppressWarning("cost-unbounded-read")]   // one message's files, and an erasure must reach every one
+public int EraseFilesOf(Message m) {
+  var gone = 0;
+  foreach (var a in MessageAttachment.Where(a => a.Message == m).ToList()) {
+    var file = a.File;
+    a.Delete();
+    file.Delete();
+    gone = gone + 1;
+  }
+  return gone + EraseOriginal(m);
+}
+
+/// For a person's erasure: the original their message arrived as (it IS their message), and the files on it MARKED about
+/// them — never a file only because they sent it (Privacy Q7).
+[SuppressWarning("cost-unbounded-read")]   // one message's files, and an erasure must reach every one
+public int EraseFilesAbout(Message m, Party party) {
+  var gone = 0;
+  foreach (var a in MessageAttachment.Where(a => a.Message == m && a.About == party).ToList()) {
+    var file = a.File;
+    a.Delete();
+    file.Delete();
+    gone = gone + 1;
+  }
+  return gone + EraseOriginal(m);
+}
+
+int EraseOriginal(Message m) {
+  if (m.Original == null) { return 0; }
+  var original = m.Original!;
+  m.Original = null;
+  original.Delete();
+  return 1;
+}
+
+/// Mark a file as ABOUT a person — their ID, their medical letter, a photo of them — so their erasure takes it. A file is
+/// never erased with a person because they sent it; somebody on the desk says it is about them. `party` null: about
+/// nobody in particular.
+public void MarkFileAbout(MessageAttachment attachment, Party? party) {
+  attachment.About = party == null ? null : Survivor(party!);
+  UnitOfWork.Commit();
+}
+
+// ── export ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One message in a person's export.
+public class ExportedMessage {
+  public Guid Conversation;
+  public string Subject = "";
+  public DateTime At;
+  public string Channel = "";
+  /// "sent" (by them) or "received" (by them, from the desk).
+  public string Direction = "";
+  public string Text = "";
+  /// The text in the language they were sent it in, when that was not the original.
+  public string? AsSent;
+  public string? Language;
+}
+
+/// Everything a person may ask for under the right of access.
+public class PartyExport {
+  public string Name = "";
+  public string? Language;
+  public List<string> ContactPoints = [];
+  public List<ExportedMessage> Messages = [];
+}
+
+/// Every message `party` sent and was sent (never a note), their contact points, as data — what a right-of-access
+/// request is answered with. Only the desk can make one.
+[SuppressWarning("cost-unbounded-read")]   // a right-of-access export must hold everything about one person
+public PartyExport ExportPartyData(Party party) {
+  var p = Survivor(party);
+  var export = new PartyExport { Name = p.DisplayName, Language = p.Language };
+  foreach (var cp in ContactPoint.Where(x => x.Party == p && x.Kind != ContactPointKind.Visitor).ToList()) {
+    export.ContactPoints.Add($"{cp.Kind}: {cp.Value}");
+  }
+  foreach (var seat in Participant.Where(s => s.Party == p).ToList()) {
+    var c = seat.Conversation;
+    foreach (var m in Message.Where(m => m.Conversation == c && m.Visibility == EntryVisibility.Customer)
+                             .OrderBy(m => m.Sequence).ToList()) {
+      var theirs = m.ByParty != null && m.ByParty!.Id == p.Id;
+      if (!theirs && m.Direction != MessageDirection.Outbound) { continue; }
+      var sent = theirs ? null : TextSentIn(m, p.Language);
+      export.Messages.Add(new ExportedMessage {
+        Conversation = c.Id, Subject = c.Subject ?? "", At = m.At, Channel = m.ChannelKey,
+        Direction = theirs ? "sent" : "received", Text = m.Text,
+        AsSent = sent != null && sent != m.Text ? sent : null, Language = m.Language,
+      });
+    }
+  }
+  return export;
+}
+
+/// The same export, as JSON — to hand over as a file.
+public string ExportPartyDataAsJson(Party party) {
+  return JsonSerializer.Serialize(ExportPartyData(party));
+}

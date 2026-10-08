@@ -1,0 +1,20 @@
+// The desk's conversation setup. In a file of its own with no `namespace`, because an `app.X = …` statement's value is
+// resolved outside the file's namespace — the `using` below is what lets it name the desk's own classes.
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+app.Conversations = new ConversationsSetup {
+  Parties  = new DeskParties(),
+  Channels = [new RecordingMail(), new RecordingSms()],
+  Translator = new TaggingTranslator(),
+  Events = new HeardChat(),
+  // The shop's own voice in the widget's first line.
+  Copy = new ShopCopy(),
+  // Small, so a test can go over it without making megabytes.
+  MaxFileBytes = 200000,
+  MaxMessageBytes = 300000,
+};
+
+// The sign-in flow's principal — what links a party to an account when someone signs in (`LinkSignedInAccount`).
+// A real app gets it from `Osysharp.Accounts`; this desk names only the role, which is all its tests run as.
+app.AuthBootstrap = new AuthBootstrap { Role = AppRole.Authenticator, Login = SignIn };

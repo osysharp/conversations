@@ -1,0 +1,143 @@
+// SIDE CONVERSATIONS ON SCREEN — a side conversation is drawn where it was started, on the timeline of the conversation
+// it is beside: a card that says who it is with, what about, whose turn it is and whether its mail arrived, and opens
+// into its own thread and composer. And the form a desk starts one with.
+
+namespace Osysharp.Conversations;
+
+using Osysharp.Ui;
+
+/// One side conversation, as a card on the timeline it was started on — closed: who it is with, its subject, how many
+/// messages, whose turn it is and anything that went wrong delivering it; open (`startOpen`, or pressed): its thread and
+/// a composer that writes to the other side (or, inside the team, notes).
+[Composable]
+public component SideConversationCard(Guid sideId, bool startOpen = false) {
+  bool open = startOpen;
+  // Read live, so the card moves with the side conversation — a reply arriving, a mail bouncing, set aside as done.
+  live var sides = Conversation.Where(c => c.Id == sideId).Take(1);
+  live var seats = Participant.Where(p => p.Conversation.Id == sideId && p.Party != null && p.Role == ParticipantRole.Customer)
+    .Include(p => p.Party).Take(1);
+  live var newest = Message.Where(m => m.Conversation.Id == sideId).OrderByDescending(m => m.Sequence).Take(1);
+  live var count = Message.Count(m => m.Conversation.Id == sideId);
+  live var lastSent = MessageDelivery.Where(d => d.Message.Conversation.Id == sideId && d.CarriedIn == null)
+    .OrderByDescending(d => d.CreatedAt).Take(1);
+
+  live var inside = seats.Count == 0;
+  live var with = seats.Count == 0 ? "" : seats[0].Party!.DisplayName;
+  live var subject = sides.Count == 0 ? "" : sides[0].Subject ?? "";
+  live var done = sides.Count > 0 && sides[0].SideClosedAt != null;
+  live var lastAt = sides.Count == 0 ? null : sides[0].LastEntryAt;
+  live var theirTurn = newest.Count > 0 && newest[0].Direction == MessageDirection.Inbound;
+  live var address = lastSent.Count > 0 && lastSent[0].To != null ? lastSent[0].To! : "";
+  live var problem = lastSent.Count == 0 ? ""
+    : lastSent[0].State == DeliveryState.Held ? "Not sent — " + (lastSent[0].Problem ?? "held")
+    : lastSent[0].Outcome == DeliveryOutcome.Failed ? "Did not arrive — " + (lastSent[0].Problem ?? "the carrier gave it back")
+    : "";
+
+  action Toggle() { open = !open; }
+  action SetAside() { SetSideDoneById(sideId, !done); }
+
+  render {
+    if (sides.Count > 0) {
+      Stack(gap: 0, w: "100%", rounded: Radius.Lg, borderW: 1, borderLW: 3,
+            border: problem != "" ? Colors.Danger : theirTurn && !done ? Colors.Primary : Colors.Border,
+            bg: Colors.Surface, animation: KitArrive,
+            label: (inside ? "Thread inside the team: " : "Side conversation with " + with + ": ") + subject) {
+        Row(gap: 3, align: Align.Start, px: 4, py: 3, minW: "0") {
+          Box(pt: 1, shrink: 0) { Icon(inside ? Icons.Users : Icons.Send, size: 16, color: Colors.TextMuted); }
+          Stack(gap: 1, grow: 1, minW: "0") {
+            Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap, minW: "0") {
+              Text(inside ? "Thread inside the team" : "Side conversation with " + with, fontSize: FontSize.Caption,
+                   color: Colors.TextMuted, fontWeight: FontWeight.Medium);
+              if (address != "") {
+                Text(address, fontSize: FontSize.Caption, color: Colors.TextMuted, fontFamily: Font.Mono,
+                     overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, whiteSpace: WhiteSpace.Nowrap, minW: "0");
+              }
+            }
+            Text(subject, fontWeight: FontWeight.Semibold, minW: "0");
+            if (!open && newest.Count > 0) {
+              Text(newest[0].ByName + ": " + newest[0].Text, fontSize: FontSize.Label, color: Colors.TextSecondary,
+                   overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, whiteSpace: WhiteSpace.Nowrap, minW: "0");
+            }
+            Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+              Badge(count == 1 ? "1 message" : count + " messages", tone: Tone.Default);
+              if (done) { Badge("Done", tone: Tone.Success); }
+              else if (!inside) {
+                if (theirTurn) { Badge(with + " answered", tone: Tone.Primary); }
+                else { Badge("Waiting on " + with, tone: Tone.Default); }
+              }
+              if (lastAt != null) {
+                Text($"{lastAt:d MMM, HH:mm}", fontSize: FontSize.Caption, color: Colors.TextMuted, fontFamily: Font.Mono,
+                     whiteSpace: WhiteSpace.Nowrap);
+              }
+            }
+            if (problem != "") {
+              Row(gap: 2, align: Align.Center, label: "Delivery problem") {
+                Lamp(tone: Tone.Danger);
+                Text(problem, fontSize: FontSize.Caption, color: Colors.Danger, minW: "0");
+              }
+            }
+          }
+          IconButton(open ? "Close the side conversation" : "Open the side conversation", Toggle, size: Size.Sm, tone: Tone.Ghost) {
+            Icon(open ? Icons.ChevronUp : Icons.ChevronDown, size: 14);
+          }
+        }
+        if (open) {
+          Stack(gap: 3, px: 4, pb: 4, pt: 1, borderTW: 1, border: Colors.Border, bg: Colors.Sunken) {
+            Box(pt: 3) { ConversationThread(sideId, desk: true); }
+            // No key of its own: it sits inside a page whose own composer sends with the send key.
+            ConversationComposer(sideId, desk: true, alwaysNote: inside, shortcut: "",
+                                 label: inside ? "Write in the thread" : "Write to " + with,
+                                 placeholder: inside ? "Only your team sees this." : "Mailed to " + with + " only.");
+            Row(gap: 2, justify: Justify.End) {
+              Button(done ? "Not done" : "Mark as done", onPress: SetAside, tone: Tone.Ghost, size: Size.Sm);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Start a side conversation beside `conversationId`: write to somebody outside — their address, and their name when it
+/// is new — or keep it inside the team; a subject and the first message. `onStarted` is handed the new side conversation's
+/// id; `onCancel` closes the form. A dialog body — an app puts it in its own `Dialog`.
+[Composable]
+public component SideConversationStarter(Guid conversationId, Action<Guid> onStarted, Action onCancel, string subject = "") {
+  bool inside = false;
+  string address = "";
+  string name = "";
+  string about = subject;
+  string text = "";
+  bool tried = false;
+  string problem = "";
+  action Start() {
+    problem = "";
+    tried = true;
+    if (about.Trim() == "" || text.Trim() == "" || (!inside && address.Trim() == "")) { return; }
+    try {
+      var id = StartSideConversationTo(conversationId, inside ? "" : address, about, text, name);
+      onStarted(id);
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  render {
+    Stack(gap: 3, label: "Start a side conversation") {
+      Switch("Inside the team — nobody outside is written to", value: inside);
+      if (!inside) {
+        Field("Their address", value: address, placeholder: "orders@supplier.example", type: "email",
+              error: tried && address.Trim() == "" ? "Give the address to write to." : "",
+              hint: "They see only this conversation — never the one it is beside.");
+        Field("Their name", value: name, placeholder: "Optional — as you would greet them");
+      }
+      Field("Subject", value: about, placeholder: "What you are asking about",
+            error: tried && about.Trim() == "" ? "Give it a subject — they read it as the mail's subject." : "");
+      TextAreaField(inside ? "First note" : "Message", value: text, rows: 5,
+                    placeholder: inside ? "What the team should look at." : "What you want to ask them.",
+                    error: tried && text.Trim() == "" ? "Write what you want to ask." : "");
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      Row(gap: 2, justify: Justify.End) {
+        Button("Cancel", onPress: onCancel, tone: Tone.Ghost);
+        Button(inside ? "Start the thread" : "Send it", onPress: Start, tone: Tone.Primary);
+      }
+    }
+  }
+}

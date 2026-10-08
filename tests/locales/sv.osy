@@ -1,0 +1,17 @@
+// sv (Svenska): a few of the kit's timeline words, for the tests that prove a timeline is said in its reader's language.
+// Every other text falls back to the source.
+
+translations sv {
+  /// Osysharp.Conversations.ConversationCopy.EventSentence · a timeline line
+  /// placeholders: {who} = who (string), {whom} = whom (string)
+  text "{who} was merged into {whom}." => "{who} slogs ihop med {whom}.";
+  /// Osysharp.Conversations.ConversationCopy.EventSentence · a timeline line
+  /// placeholders: {blanked} = blanked (int) — {blanked} is a count
+  text "A customer's words were erased on request. Messages blanked: {blanked}. The timeline keeps its shape." => {
+    one: "En kunds ord raderades på begäran. Ett meddelande tömdes. Tidslinjen behåller sin form.",
+    other: "En kunds ord raderades på begäran. {blanked} meddelanden tömdes. Tidslinjen behåller sin form." };
+  /// Osysharp.Conversations.EventWords · a timeline line
+  text "Erased with the conversation's words." => "Raderad tillsammans med samtalets ord.";
+  /// Osysharp.Conversations.ConversationCopy.EventSentence · a timeline line
+  text "A customer" => "En kund";
+}

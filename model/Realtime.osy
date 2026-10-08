@@ -1,0 +1,50 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+
+// ── live: who is here, who is typing ─────────────────────────────────────────────────────────────────────────────────
+//
+// ⚑ NO TOPIC HERE CARRIES WHAT ANYONE SAID. A new entry reaches an open page through the platform's own change signal
+//   (a `live var` over the timeline re-reads when an entry is written — an id, never a row: SECURITY-INVARIANT
+//   realtime-broadcast-signal-only), and the page reads the entry THROUGH ITS RULES. So a note written while a customer
+//   watches reaches their page as nothing at all. These topics carry a seat and a typing flag — never words.
+
+/// One seat's presence — who (the platform stamps the signed-in caller into `Who`), and what they are doing: "viewing",
+/// "replying", "writing a note".
+public class ConversationSeat {
+  public Principal? Who;
+  public string Activity = "";
+  /// Announced by the customer's side (the widget, the portal) — so the desk can say "the customer is here" for a
+  /// signed-out visitor too, who has no `Who`.
+  public bool Customer;
+}
+
+/// Somebody is typing in a conversation — or has stopped. `Who` is stamped by the platform for a signed-in sender and is
+/// null for a chat visitor; `Name` is what the other side shows.
+public class TypingSignal {
+  public Principal? Who;
+  public string Name = "";
+  public bool Typing;
+}
+
+/// Who is in a conversation right now — the desk, a signed-in customer, and a chat visitor. A visitor is present by its
+/// VISIT, which the platform keeps to itself: its seat carries only what it announced (`Customer`, an activity), never the
+/// visit id. The customer's TYPING rides `ConversationTyping`.
+[AllowAnonymous]
+topic ConversationPresence(Guid conversationId) {
+  Candidates = u => IsConversationStaff || IsCustomerIn(conversationId);
+  Carries    = ConversationSeat;
+  Presence   = true;
+}
+
+/// Typing, both ways — the customer (a chat visitor included) and the desk. A flag and a name, never a word.
+[AllowAnonymous]
+topic ConversationTyping(Guid conversationId) {
+  Candidates = u => IsConversationStaff || IsCustomerIn(conversationId);
+  Carries    = TypingSignal;
+}
+
+// The DESK's own seats — who has a conversation open, and who is replying or writing a note (collision) — are the
+// Collaboration kit's record presence, addressed by the conversation's id (`RecordPresence.For(conversationId)`,
+// `SeatActivity`, `RecordSeats`): one seat set per record, whichever kit draws it, so an app showing a conversation
+// beside the item it belongs to does not show two. Who may sit there is the app's `CollaboratesOnRecords`.

@@ -1,0 +1,488 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+
+/// How the app's conversations work — `app.Conversations = new ConversationsSetup { … }`. Every field has a default, so
+/// an app that states nothing still has a working web channel.
+[AppSetting("Conversations")]
+public class ConversationsSetup {
+  /// How parties are made and found — override `PartyKinds.New` to make the app's own kind (`Customer : Party`).
+  public PartyKinds Parties = new PartyKinds();
+  /// The channels the app talks on besides the web (which is always there) — `new MailConversationChannel { … }`,
+  /// `new SmsConversationChannel { … }`. A reply goes out on the conversation's reply channel.
+  public List<IConversationChannel> Channels = [];
+  /// For a channel with no threading of its own (SMS): how long after a conversation's last entry a message from the
+  /// same sender continues it, rather than starting a new one.
+  public TimeSpan ThreadWindow = TimeSpan.FromDays(7);
+  /// A reply written in the chat that the customer has not read after this long is MAILED to them — every unread reply,
+  /// and a link that continues the conversation in any browser (`WebFollowUp`). Null: never.
+  public TimeSpan? ContinueByAfter = TimeSpan.FromMinutes(10);
+  /// What that follow-up reaches the customer at — the channel set up in `Channels` that reaches this kind of contact
+  /// point carries it (`ContactPointKind.Email`: the mail channel, to the address they left). Nothing is sent while no
+  /// channel reaches it.
+  public ContactPointKind ContinueOn = ContactPointKind.Email;
+  /// Where the continue link opens — `{link}` is the link. The kit serves `ConversationContinuePage` there.
+  public string ContinuePath = "/conversations/continue/{link}";
+  /// Where a browser goes once it has been continued in: a page with the `ConversationWidget` on it. The kit serves
+  /// `ConversationChatPage` there; an app with the widget on a page of its own names that page.
+  public string ChatPath = "/conversations/chat";
+  /// The words the kit writes to customers — override a method to change a sentence (`ConversationCopy`).
+  public ConversationCopy Copy = new ConversationCopy();
+  /// What the app hears when a customer writes in the chat — override a method to act on it (`ConversationEvents`): a
+  /// desk opens a ticket for a new conversation, and tells whoever holds it about the next message.
+  public ConversationEvents Events = new ConversationEvents();
+  /// Detects and translates — the app's own provider, its own key (`IConversationTranslator`). None: nothing is
+  /// translated, and every message's original stands as its canonical copy.
+  public IConversationTranslator? Translator = null;
+  /// The desk's language — every message gets a redacted copy in it (`Message.CanonicalText`), which search and memory
+  /// read. BCP-47. An organisation may seed its own working language for every desk it runs.
+  [OrgPolicy(OrgPolicyMode.Default)] public string CanonicalLanguage = "en";
+  /// Terms a translation keeps as written — product and brand names.
+  public List<GlossaryTerm> Glossary = [];
+  /// What is scrubbed from every message as it is stored, and redacted before a model sees it.
+  public ConversationRedactor Redactor = new ConversationRedactor();
+  /// The largest file a message may carry (0.8.0) — said as a sentence when it is over. An organisation's policy may
+  /// bound it (both limits) for every app it runs.
+  [OrgPolicy(OrgPolicyMode.Range)] public long MaxFileBytes = 10 * 1024 * 1024;
+  /// The most all of one message's files may come to.
+  [OrgPolicy(OrgPolicyMode.Range)] public long MaxMessageBytes = 25 * 1024 * 1024;
+}
+
+/// What happens in the chat, for the app to act on — the kit tells nobody by itself. Each runs in the customer's own
+/// request, after their message is committed, under their rules (exactly as a web form of the app's own would): what
+/// it writes, the customer must be allowed to write.
+///
+///     public class DeskChat : ConversationEvents {
+///       public override void CustomerWrote(Conversation c, string text, bool started) { if (started) { OpenTicketFor(c, text); } }
+///     }
+public class ConversationEvents {
+  /// A customer wrote in the chat (`ConversationWidget`): `started` when it was their first message, which began
+  /// `conversation`. A message the app's own pages post with `Reply` is the app's to act on, and does not come here.
+  public virtual void CustomerWrote(Conversation conversation, string text, bool started) { }
+  /// The language a customer writes in became known — detected from `party`'s first message on `conversation`, after
+  /// it was written (`MessageLanguage`). A desk routes or answers by it. Runs in the kit's language run, as the app.
+  public virtual void LanguageKnown(Conversation conversation, Party party, string language) { }
+  /// The other side answered in the side conversation `side` — by mail, or on the web. Its line is already on the
+  /// conversation it is beside (`side.SideOf`); a desk tells whoever works that conversation. Runs as the kit's run (a
+  /// web answer) or the mailbox's receiver (a mailed one) — never as the person who answered.
+  public virtual void SideAnswered(Conversation side) { }
+}
+
+// ── the customer's side: the widget and the portal ────────────────────────────────────────────────────────────────
+
+/// A customer starts a conversation from the widget or the portal — signed in or not — with their first message.
+/// Their party is their signed-in account's (`AccountParty`), else their visit's (made on the first message,
+/// `VisitorParty`); they take the customer's seat.
+[AllowAnonymous]
+public Conversation StartConversation(string text, string subject = "", string name = "", string email = "",
+                                      List<FileAsset>? files = null) {
+  var said = text.Trim();
+  if (said == "" && (files == null || files.Count == 0)) {
+    throw new ValidationException("Write something first — a conversation starts with a message.");
+  }
+  var now = DateTime.UtcNow;
+  // Its language is learnt after the commit, from this first message (`MessageLanguage`).
+  var party = CallerParty(name.Trim(), null);
+  ClaimAddress(party, email);
+  var conversation = new Conversation {
+    Subject = subject.Trim() == "" ? null : subject.Trim(), StartedAt = now, StartedByVisit = Visitor.Id,
+  };
+  new Participant { Conversation = conversation, Party = party, Role = ParticipantRole.Customer, JoinedAt = now };
+  // The seat is what the customer's first message is checked against, so it is written first.
+  UnitOfWork.Commit();
+  var first = WriteInbound(conversation, party, said, "web", "portal", now);
+  if (files != null && files.Count > 0) { Attach(first, files); }
+  return conversation;
+}
+
+/// A customer writes in a conversation they are in — on the web (the widget or the portal).
+[AllowAnonymous]
+public Message Reply(Conversation conversation, string text, List<FileAsset>? files = null) {
+  var said = text.Trim();
+  if (said == "" && (files == null || files.Count == 0)) { throw new ValidationException("Write something first, or attach a file."); }
+  var seat = MySeat(conversation);
+  if (seat == null || seat.Party == null) {
+    throw new NotAuthorized("You are not in this conversation.");
+  }
+  var message = WriteInbound(conversation, seat.Party, said, "web", "portal", DateTime.UtcNow);
+  if (files != null && files.Count > 0) { Attach(message, files); }
+  return message;
+}
+
+/// The customer's own seat in `conversation` — the seat of the party the caller IS (`IsParty`: their account's, their
+/// visit's, or one this browser was continued in) — or null.
+[AllowAnonymous]
+[SuppressWarning("cost-unbounded-read")]   // one conversation's seats
+public Participant? MySeat(Conversation conversation) {
+  foreach (var seat in Participant.Where(p => p.Conversation == conversation && p.LeftAt == null && p.Party != null).ToList()) {
+    if (IsMySeat(seat.Id)) { return seat; }
+  }
+  return null;
+}
+
+/// The desk takes down what a customer said some other way — a call, a mail forwarded by hand — as the CUSTOMER's own
+/// message on `conversation`: scrubbed at rest (a card number read out on the phone is never kept) and given its language
+/// work, exactly as every message a customer writes. `endpoint` names where it was taken down ("desk", "phone").
+public Message TakeDown(Conversation conversation, Party from, string text, string endpoint = "desk") {
+  var said = text.Trim();
+  if (said == "") { throw new ValidationException("Write what they said first."); }
+  return WriteInbound(conversation, from, said, "web", endpoint, DateTime.UtcNow);
+}
+
+Message WriteInbound(Conversation conversation, Party from, string text, string channelKey, string? endpoint, DateTime at) {
+  var message = new Message {
+    Conversation = conversation, At = at, Visibility = EntryVisibility.Customer, Direction = MessageDirection.Inbound,
+    ChannelKey = channelKey, Endpoint = endpoint, Text = App.Setting<ConversationsSetup>().Redactor.ScrubAtRest(text),
+    ByParty = from, ByName = from.DisplayName,
+  };
+  ApplyLanguage(message);
+  conversation.LastEntryAt = at;
+  conversation.LastCustomerEntryAt = at;
+  conversation.ReplyChannel = channelKey;
+  conversation.ReplyEndpoint = endpoint;
+  // An answer in a side conversation is told on the one it is beside — by the kit's run, after the commit: the writer
+  // cannot read which conversation that is, and does not need to.
+  if (conversation.IsSide) { new SideAnswerNote { Message = message }; }
+  return message;
+}
+
+// ── the team's side ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Staff open a conversation with a party — an outbound one, or one taken down from a phone call. The caller takes a
+/// staff seat; the party the customer's.
+public Conversation OpenConversation(Party with, string subject = "") {
+  var now = DateTime.UtcNow;
+  var conversation = new Conversation { Subject = subject.Trim() == "" ? null : subject.Trim(), StartedAt = now };
+  new Participant { Conversation = conversation, Party = with, Role = ParticipantRole.Customer, JoinedAt = now };
+  var me = Session.CurrentUser;
+  if (me != null) {
+    new Participant { Conversation = conversation, Member = me, Role = ParticipantRole.Staff, JoinedAt = now };
+  }
+  return conversation;
+}
+
+/// Staff (or an AI, `asAgent`) write on a conversation: a customer-visible reply, or a note (`Internal`) or a draft
+/// (`AiInternal`) that only staff ever see. A reply goes out on the conversation's reply channel — on the web, the entry
+/// itself is the delivery.
+public Message Post(Conversation conversation, string text, EntryVisibility visibility = EntryVisibility.Customer,
+                    string? asAgent = null, string? channelKey = null, List<FileAsset>? files = null,
+                    TextFormat format = TextFormat.Plain) {
+  return Write(conversation, text, visibility, asAgent, channelKey, files, format, null);
+}
+
+/// `Post`, and — for `ApproveDraft` — the draft the message is sent from. The draft is set as the message is made, so it
+/// is part of the row the rules judge when it is written, never a change to it afterwards (`deny update ApprovedFrom`).
+Message Write(Conversation conversation, string text, EntryVisibility visibility, string? asAgent, string? channelKey,
+              List<FileAsset>? files, TextFormat format, Message? approvedFrom) {
+  var said = text.Trim();
+  if (said == "" && (files == null || files.Count == 0)) { throw new ValidationException("Write something first, or attach a file."); }
+  // A note or a draft goes on NO channel — refused by name rather than quietly kept off one.
+  if (visibility != EntryVisibility.Customer && channelKey != null && channelKey != "internal") {
+    throw new ValidationException("A note is never sent on a channel — post it without one, or post a customer-visible reply.");
+  }
+  var channel = visibility == EntryVisibility.Customer ? (channelKey ?? conversation.ReplyChannel) : "internal";
+  if (channel != "web" && channel != "internal" && ChannelFor(channel) == null) {
+    throw new ValidationException($"No channel '{channel}' is set up — name it in app.Conversations.Channels, or reply on the web.");
+  }
+  // Too long for the channel: said now, while the writer can still shorten it — never cut by a carrier later.
+  if (channel != "web" && channel != "internal" && ChannelFor(channel)!.MaxLength() > 0 && said.Length > ChannelFor(channel)!.MaxLength()) {
+    throw new ValidationException($"This reply is {said.Length} characters, and one {channel} message carries at most "
+      + $"{ChannelFor(channel)!.MaxLength()} — shorten it, or send it on another channel.");
+  }
+  var now = DateTime.UtcNow;
+  var me = Session.CurrentUser;
+  var message = new Message {
+    Conversation = conversation, At = now, Visibility = visibility,
+    Direction = visibility == EntryVisibility.Customer ? MessageDirection.Outbound : MessageDirection.Internal,
+    ChannelKey = channel,
+    Endpoint = visibility == EntryVisibility.Customer && channel == conversation.ReplyChannel ? conversation.ReplyEndpoint : null,
+    // Scrubbed as it is stored — a card number pasted into a reply (or a note) is never kept either.
+    Text = App.Setting<ConversationsSetup>().Redactor.ScrubAtRest(said),
+    Format = format,
+    ByMember = asAgent == null ? me : null,
+    ByAgent = asAgent,
+    ByName = asAgent ?? (me == null ? "" : me.DisplayName),
+    ApprovedFrom = approvedFrom,
+  };
+  ApplyLanguage(message);
+  // Its files — checked, and readable exactly where the message is (Attachments.osy).
+  if (files != null && files.Count > 0) { Attach(message, files); }
+  conversation.LastEntryAt = now;
+  // A side conversation set aside as done is open again once somebody writes in it.
+  if (conversation.SideOf != null && conversation.SideClosedAt != null) { conversation.SideClosedAt = null; }
+  // Out on its channel after the commit — the web needs no delivery: the entry is it. A reply in the chat that nobody
+  // reads in time is mailed (`WebFollowUp`).
+  if (visibility == EntryVisibility.Customer) {
+    QueueDeliveries(message, channel);
+    if (channel == "web") { FollowUpLater(conversation); }
+  }
+  return message;
+}
+
+/// A colleague's customer-visible reply on `conversation` written after place `seen` (the last `Sequence` the caller had
+/// on screen) — or null. What a desk composer asks before it sends, so a customer is never answered twice: two agents
+/// writing on one conversation is the commonest collision a desk has, and the second should read the first's reply
+/// before theirs goes out. The caller's own replies never count.
+public Message? AnsweredSince(Conversation conversation, int seen) {
+  // The first one is the answer, so the first one is all that is read — however many were written since.
+  var me = Session.CurrentUser.Id;
+  return Message.Where(m => m.Conversation == conversation && m.Sequence > seen
+      && m.Direction == MessageDirection.Outbound && m.Visibility == EntryVisibility.Customer
+      && (me == null || m.ByMember == null || m.ByMember.Id != me))
+    .OrderBy(m => m.Sequence).FirstOrDefault();
+}
+
+/// Send an AI's draft — as written, or as edited — as a NEW customer-visible message that points back at it. The draft
+/// itself never changes and stays where it was: internal (`entry-visibility-is-immutable`).
+public Message ApproveDraft(Message draft, string? editedText = null) {
+  if (draft.Visibility != EntryVisibility.AiInternal) {
+    throw new ValidationException("Only an AI's draft is approved — this entry is not one.");
+  }
+  return Write(draft.Conversation, editedText ?? draft.Text, EntryVisibility.Customer, null, null, null, TextFormat.Plain, draft);
+}
+
+/// Something that happened, on the timeline — the way other kits and the app write their facts ("inbox.assigned").
+/// Internal unless said otherwise; a customer-visible event is one the customer is told ("Your request was solved").
+/// `at`: when it HAPPENED, when that is not now — an imported ticket's history, or a breach the inbox found late, lands
+/// on the timeline at its own minute rather than the minute it was noticed. Default: now.
+///
+/// It stores WHAT happened, never a sentence: its facts — `facts`, a class of the writer's own serialized
+/// (`JsonSerializer.Serialize(new TicketFacts { … })`), and `person` (with `personParty` when it is a party, so erasing
+/// who they are reaches the name) — and `ConversationCopy.EventSentence` says it, in the reader's language, when it is
+/// read. Pass the facts IN: a timeline is often written by a body a customer or a timer drove, which only the kit's own
+/// code writes past, and a row is judged as the call that makes it returns — a fact set on it afterwards is the caller's
+/// write, and is refused.
+public ConversationEvent Record(Conversation conversation, string kind, string source,
+                                EntryVisibility visibility = EntryVisibility.Internal, DateTime? at = null,
+                                string? facts = null, string person = "", Party? personParty = null,
+                                Conversation? side = null) {
+  var me = Session.CurrentUser;
+  return new ConversationEvent {
+    Conversation = conversation, At = HappenedAt(conversation, at), Visibility = visibility, Kind = kind, Source = source,
+    ByMember = me, ByName = SignedAs(source), Facts = facts, Person = person, PersonParty = personParty, Side = side,
+  };
+}
+
+/// When an entry written now on `conversation` happened — `at`, or now — moving the conversation's last entry on.
+DateTime HappenedAt(Conversation conversation, DateTime? at = null) {
+  var when = at ?? DateTime.UtcNow;
+  // The conversation's last entry only moves FORWARD: a fact recorded at its past minute is not its latest entry.
+  if (conversation.LastEntryAt == null || when > conversation.LastEntryAt.Value) { conversation.LastEntryAt = when; }
+  return when;
+}
+
+/// The name an entry written now is signed with — the signed-in member's, or `source` when the system writes it.
+string SignedAs(string source) {
+  var me = Session.CurrentUser;
+  return me == null ? source : me.DisplayName;
+}
+
+/// One event as its reader reads it — what a timeline shows between its messages.
+public class EventLine {
+  public Guid Id;
+  public string Sentence = "";
+}
+
+/// What `happened` says, to whoever is reading — in their language, said from its facts by the app's
+/// `ConversationCopy.EventSentence`. An event whose words were erased with its conversation says so.
+public string EventWords(ConversationEvent happened) {
+  if (happened.Erased) { return "Erased with the conversation's words."; }
+  return App.Setting<ConversationsSetup>().Copy.EventSentence(happened);
+}
+
+/// The latest `take` events of `conversationId` the reader may read, each said for them — ONE read, in their language.
+/// What a timeline fetches when it opens. Callable from a public page (the chat widget): which rows answer is decided by
+/// their own rules, so a visitor gets the events of their own conversation they may see, and nothing else.
+[AllowAnonymous]
+public List<EventLine> ConversationEventLines(Guid conversationId, int take) {
+  List<EventLine> lines = [];
+  foreach (var happened in ConversationEvent.Where(e => e.Conversation.Id == conversationId)
+      .OrderByDescending(e => e.Sequence).Take(take).ToList()) {
+    lines.Add(new EventLine { Id = happened.Id, Sentence = EventWords(happened) });
+  }
+  return lines;
+}
+
+/// One event, said for the reader — what a line that arrived after the timeline opened fetches. "" when they may not
+/// read it.
+[AllowAnonymous]
+public string EventLineOf(Guid eventId) {
+  var happened = ConversationEvent.FirstOrDefault(e => e.Id == eventId);
+  return happened == null ? "" : EventWords(happened);
+}
+
+/// The sentence `said` holds for event `id` — "" when it is not among them.
+public string SentenceFor(List<EventLine> said, Guid id) {
+  foreach (var l in said) { if (l.Id == id) { return l.Sentence; } }
+  return "";
+}
+
+/// Seat a member of staff (or yourself) in a conversation.
+public Participant Seat(Conversation conversation, Principal member) {
+  var already = Participant.FirstOrDefault(p => p.Conversation == conversation && p.Member == member);
+  if (already != null) {
+    already.LeftAt = null;
+    return already;
+  }
+  return new Participant { Conversation = conversation, Member = member, Role = ParticipantRole.Staff, JoinedAt = DateTime.UtcNow };
+}
+
+/// Seat another party — a customer's colleague, someone copied (`ParticipantRole.Cc`).
+public Participant SeatParty(Conversation conversation, Party party, ParticipantRole role = ParticipantRole.Cc) {
+  var already = Participant.FirstOrDefault(p => p.Conversation == conversation && p.Party == party);
+  if (already != null) { return already; }
+  return new Participant { Conversation = conversation, Party = party, Role = role, JoinedAt = DateTime.UtcNow };
+}
+
+/// Seat an AI agent, by name.
+public Participant SeatAi(Conversation conversation, string agentName) {
+  var already = Participant.FirstOrDefault(p => p.Conversation == conversation && p.AgentName == agentName);
+  if (already != null) { return already; }
+  return new Participant { Conversation = conversation, AgentName = agentName, Role = ParticipantRole.Ai, JoinedAt = DateTime.UtcNow };
+}
+
+// ── typing ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Tell the other side the caller is typing in `conversation` — or has stopped. Sent by the composer as the draft
+/// starts and when it is sent or cleared; the name is the caller's seat's (their party's, or their own account's).
+[AllowAnonymous]
+public void TypingIn(Conversation conversation, bool typing) {
+  var seat = CallersSeat(conversation);
+  var me = Session.CurrentUser;
+  var name = seat != null && seat.Party != null ? seat.Party.DisplayName : (me != null ? me.DisplayName : "");
+  ConversationTyping.For(conversation.Id).Publish(new TypingSignal { Name = name, Typing = typing });
+}
+
+// ── the components' server side: by id, and committed ──────────────────────────────────────────────────────────────
+// A page holds a conversation's id (its route, a list row); these take it, do the one thing, and commit — a page
+// action does not commit on its own.
+
+/// The desk sends a reply, or a note, from the composer.
+///
+/// ⚑ `[AllowAnonymous]` because the ONE composer serves both sides, so a public chat page reaches it — and a caller who
+///   is not staff gets nothing from it: the kit's floor refuses them an outbound message and a note
+///   (`customer-cannot-forge-internal-entries`), and the follow-up clock it starts refuses anyone but staff.
+[AllowAnonymous]
+public Message ReplyFromDesk(Guid conversationId, string text, bool note = false, List<Guid>? fileIds = null) {
+  var sent = Post(Conversation.Single(c => c.Id == conversationId), text,
+                  note ? EntryVisibility.Internal : EntryVisibility.Customer, files: OwnFiles(fileIds));
+  UnitOfWork.Commit();
+  return sent;
+}
+
+/// A customer sends from the widget or the portal.
+[AllowAnonymous]
+public Message ReplyAsCustomer(Guid conversationId, string text, List<Guid>? fileIds = null) {
+  var conversation = Conversation.Single(c => c.Id == conversationId);
+  var sent = Reply(conversation, text, OwnFiles(fileIds));
+  UnitOfWork.Commit();
+  App.Setting<ConversationsSetup>().Events.CustomerWrote(conversation, text.Trim(), false);
+  return sent;
+}
+
+/// The page has shown everything up to now — the caller's read mark moves.
+[AllowAnonymous]
+public void MarkConversationRead(Guid conversationId) {
+  var conversation = Conversation.FirstOrDefault(c => c.Id == conversationId);
+  if (conversation == null) { return; }
+  // Nothing to commit when the mark does not move — the reader has no seat, or had already seen the newest. A page calls
+  // this as it opens and as entries arrive, and a commit that writes nothing still cost ~35 statements (SP-73).
+  if (!MarkRead(conversation)) { return; }
+  UnitOfWork.Commit();
+}
+
+/// Everything a desk's view of a conversation asks the server for as it opens: what its latest `take` events say for the
+/// reader, whether translation is working on it, and the reader's mark moved to its newest entry. A page that shows a
+/// conversation beside other things asks this ONCE (`OpenThread`) and hands it to `ConversationThread` and
+/// `ConversationLanguageNotice` (`opened:`), so opening a conversation costs one call to the server instead of one per
+/// component.
+public class ConversationOpening {
+  /// False until the server has answered — a component handed one waits for it instead of asking for itself.
+  public bool Loaded;
+  public List<EventLine> Said = [];
+  public LanguageStatus Language = new LanguageStatus();
+  /// The newest place the reader's mark stands at after opening — -1 when the conversation holds nothing they may read.
+  public int Newest = -1;
+}
+
+/// What `conversationId` opens with on the desk (`ConversationOpening`). Commits only when the reader's mark moved — a
+/// conversation they had already read is opened without a write.
+public ConversationOpening OpenThread(Guid conversationId, int take = 100) {
+  var opening = new ConversationOpening { Loaded = true };
+  var conversation = Conversation.FirstOrDefault(c => c.Id == conversationId);
+  if (conversation == null) { return opening; }
+  opening.Said = ConversationEventLines(conversationId, take);
+  opening.Language = LanguageStatusOf(conversationId);
+  opening.Newest = ConversationEntry.Where(e => e.Conversation == conversation).Max(e => e.Sequence) ?? -1;
+  if (MarkReadUpTo(conversation, opening.Newest)) { UnitOfWork.Commit(); }
+  return opening;
+}
+
+/// The composer says the caller started — or stopped — typing.
+[AllowAnonymous]
+public void TypingInConversation(Guid conversationId, bool typing) {
+  var conversation = Conversation.FirstOrDefault(c => c.Id == conversationId);
+  if (conversation == null) { return; }
+  TypingIn(conversation, typing);
+}
+
+/// The widget's first message: a new conversation for this visit (or this signed-in customer), committed.
+[AllowAnonymous]
+public Guid StartFromWidget(string text, string name = "", string email = "", List<Guid>? fileIds = null) {
+  var conversation = StartConversation(text, "", name, email, OwnFiles(fileIds));
+  UnitOfWork.Commit();
+  App.Setting<ConversationsSetup>().Events.CustomerWrote(conversation, text.Trim(), true);
+  return conversation.Id;
+}
+
+// ── read state ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The caller has seen everything on `conversation` they can see — their seat's read mark moves to the newest place.
+/// Answers whether it moved.
+[AllowAnonymous]
+public bool MarkRead(Conversation conversation) {
+  return MarkReadUpTo(conversation, ConversationEntry.Where(e => e.Conversation == conversation).Max(e => e.Sequence) ?? -1);
+}
+
+/// The caller's read mark moves to `newest` (the conversation's newest place, already read) — when that is past it.
+bool MarkReadUpTo(Conversation conversation, int newest) {
+  var seat = CallersSeat(conversation);
+  if (seat == null) { return false; }
+  if (newest > seat.LastReadSequence) {
+    seat.LastReadSequence = newest;
+    seat.LastReadAt = DateTime.UtcNow;
+    return true;
+  }
+  return false;
+}
+
+/// How many customer-visible entries on `conversation` the caller has not seen — never their own.
+[AllowAnonymous]
+public int Unread(Conversation conversation) {
+  var seat = CallersSeat(conversation);
+  if (seat == null) { return 0; }
+  var mark = seat.LastReadSequence;
+  // Counted by the database: a conversation the reader left long ago costs one row, not every entry since.
+  if (seat.Party != null) {
+    var party = seat.Party!;
+    return ConversationEntry.Count(e => e.Conversation == conversation && e.Sequence > mark
+      && e.Visibility == EntryVisibility.Customer && (e.ByParty == null || e.ByParty != party));
+  }
+  if (seat.Member == null) { return 0; }
+  var member = seat.Member!;
+  return ConversationEntry.Count(e => e.Conversation == conversation && e.Sequence > mark
+    && e.Visibility == EntryVisibility.Customer && (e.ByMember == null || e.ByMember != member));
+}
+
+/// The caller's seat: a staff member's own, or the customer's (account or visit).
+[AllowAnonymous]
+public Participant? CallersSeat(Conversation conversation) {
+  // Who is asking, by id — the request already knows it, where the caller's whole row would be a read of its own.
+  var me = Session.CurrentUser.Id;
+  if (me != null) {
+    var staffSeat = Participant.FirstOrDefault(p => p.Conversation == conversation && p.Member.Id == me);
+    if (staffSeat != null) { return staffSeat; }
+  }
+  return MySeat(conversation);
+}

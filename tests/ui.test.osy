@@ -1,0 +1,301 @@
+// Osysharp.Conversations — the components, driven as a customer and an agent drive them. `osy test --pixels`
+// photographs each (Ui.Shot); the README's pictures are these.
+//
+// The desk (Ada), Cus, Dee and Eve are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void the_widget_starts_a_conversation_signed_out_and_keeps_it_after_a_reload() {
+  Ui.Visit("/chat");
+  Ui.Shot("widget-start");
+  Ui.Fill("Your name", "Eve");
+  Ui.Fill("Your message", "Is the shop open on Sunday?");
+  Ui.Click("Start the conversation");
+  Assert.Visible("Is the shop open on Sunday?");
+  Assert.Hidden("Start the conversation");
+
+  // A reload is the same browser, so the same visit — and the same conversation.
+  Ui.Visit("/chat");
+  Assert.Visible("Is the shop open on Sunday?");
+  Ui.Shot("widget-conversation");
+}
+
+[Test(Desk)]
+void a_note_written_while_the_customer_watches_never_reaches_their_page() {
+  Ui.Visit("/chat");
+  Ui.Fill("Your message", "My parcel has not arrived.");
+  Ui.Click("Start the conversation");
+  Assert.Visible("My parcel has not arrived.");
+
+  runas (Ada) {
+    var c = Conversation.Single(x => x.StartedByVisit != null);
+    Post(c, "Sorry about that — it left the warehouse this morning.");
+    Post(c, "Courier lost two parcels this week. Escalate if it happens again.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+  }
+  Ui.AwaitChange(Osysharp.Conversations.Message);
+
+  Assert.Visible("Sorry about that — it left the warehouse this morning.");
+  Assert.Hidden("Courier lost two parcels this week. Escalate if it happens again.");
+  Assert.Hidden("Internal note");
+  Ui.Shot("widget-reply");
+}
+
+[Test(Desk)]
+void a_customer_reply_reaches_the_agents_open_page() {
+  Guid id = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Order 1001");
+    UnitOfWork.Commit();
+    Post(c, "Thanks — we are looking into it.");
+    UnitOfWork.Commit();
+    id = c.Id;
+  }
+  Ui.SignInAs(Ada);
+  Ui.Visit($"/desk/{id}");
+  Assert.Visible("Thanks — we are looking into it.");
+
+  runas (Cus) {
+    Reply(Conversation.Single(x => x.Id == id), "Any news on my order?");
+    UnitOfWork.Commit();
+  }
+  Ui.AwaitChange(Osysharp.Conversations.Message);
+  Assert.Visible("Any news on my order?");
+  Ui.Shot("desk-conversation");
+}
+
+[Test(Desk)]
+void the_desk_writes_a_note_and_the_page_marks_it_internal() {
+  Guid id = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Refund");
+    UnitOfWork.Commit();
+    id = c.Id;
+  }
+  Ui.SignInAs(Ada);
+  Ui.Visit($"/desk/{id}");
+  Ui.Check("Internal note");
+  Ui.Fill("Note to the team", "Check the refund policy before answering.");
+  Ui.Click("Add note");
+  Assert.Visible("Check the refund policy before answering.");
+  Ui.Shot("desk-note");
+  // …and it is a note: the customer, on her own reading, never sees it.
+  runas (Cus) { Assert.Equal(0, Osysharp.Conversations.Message.Count(m => m.Text.StartsWith("Check the refund"))); }
+}
+
+[Test(Desk)]
+void a_chat_left_unread_continues_on_another_device_from_the_mail() {
+  // Ana asks in the chat, leaving her address — the widget says what the address is for.
+  Ui.Visit("/chat");
+  Assert.Visible("we will send our answer there");
+  Ui.Fill("Your name", "Ana");
+  Ui.Fill("Your email", "ana@example.test");
+  Ui.Fill("Your message", "Do you ship to Norway?");
+  Ui.Shot("widget-start-email");
+  Ui.Click("Start the conversation");
+  Assert.Visible("Do you ship to Norway?");
+
+  // She closes the tab (the page that would have read the answer is gone); the desk answers; ten minutes later the
+  // answer is mailed with a continue link.
+  Ui.NewDevice();
+  runas (Ada) {
+    Post(Conversation.Single(x => x.StartedByVisit != null), "Yes — to every Nordic country.");
+    UnitOfWork.Commit();
+  }
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  var link = "";
+  runas (Ada) {
+    foreach (var seat in Participant.Where(p => p.Party != null).ToList()) { Workflow.Settle(seat); }
+    foreach (var w in MessageLanguageWork.ToList()) { Workflow.Settle(w); }
+    foreach (var d in MessageDelivery.ToList()) { Workflow.Settle(d); }
+    var mail = Carried.Single();
+    link = mail.ContinueLink.Substring(mail.ContinueLink.IndexOf("/conversations/continue/"));
+  }
+
+  // On her phone she opens the link: one button, and the whole conversation is there.
+  Ui.Visit(link);
+  Ui.Shot("continue-link");
+  Ui.Click("Continue here");
+  Assert.Visible("Do you ship to Norway?");
+  Assert.Visible("Yes — to every Nordic country.");
+  Ui.Shot("continued-on-another-device");
+
+  // The link is spent: on a third device it opens nothing.
+  Ui.NewDevice();
+  Ui.Visit(link);
+  Assert.Visible("This link has expired or is not valid.");
+}
+
+[Test(Desk)]
+void the_components_hold_in_the_dark_and_on_a_phone() {
+  Guid id = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Order 1001");
+    UnitOfWork.Commit();
+    Post(c, "Thanks — the courier collects it this afternoon.");
+    Post(c, "Courier is late twice this week — watch it.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+    id = c.Id;
+  }
+  runas (Cus) {
+    Reply(Conversation.Single(x => x.Id == id), "Great, thank you!");
+    UnitOfWork.Commit();
+  }
+  // The widget on a phone, light and dark.
+  Ui.Viewport(390);
+  Ui.Visit("/chat");
+  Ui.Fill("Your message", "Is the shop open on Sunday?");
+  Ui.Click("Start the conversation");
+  Assert.Visible("Is the shop open on Sunday?");
+  Ui.Shot("widget-phone");
+  Ui.Click("Switch theme");
+  Assert.Visible("Is the shop open on Sunday?");
+  Ui.Shot("widget-phone-dark");
+  Ui.Click("Switch theme");   // back to light — the scheme is the browser's, and the desk below starts from light
+
+  // The desk, wide, then dark: every colour is a token, so the other scheme is the same page in the other palette.
+  Ui.SignInAs(Ada);
+  Ui.Viewport(1280);
+  Ui.Visit($"/desk/{id}");
+  Assert.Visible("Courier is late twice this week — watch it.");
+  Ui.Click("Switch theme");
+  Assert.Visible("Great, thank you!");
+  Ui.Shot("desk-dark");
+  // …and on a phone: the bubbles keep their sides, the composer its full width.
+  Ui.Viewport(390);
+  Assert.Visible("Thanks — the courier collects it this afternoon.");
+  Ui.Shot("desk-phone-dark");
+  Ui.Click("Switch theme");
+  Ui.Shot("desk-phone");
+}
+
+[Test(Desk)]
+void a_visitor_proves_their_address_in_the_widget_and_gets_their_earlier_conversations() {
+  runas (Inbox) {
+    ReceiveInbound(new InboundMessage { ChannelKey = "email", Endpoint = "support@desk.test", From = "ana@example.test",
+                                        ExternalId = "<a1@example.test>", Subject = "Order", Text = "Where is order 1001?" });
+    UnitOfWork.Commit();
+  }
+  Ui.Visit("/chat");
+  Ui.Fill("Your message", "Hello — I mailed you last week.");
+  Ui.Click("Start the conversation");
+  Assert.Hidden("Where is order 1001?");
+  Ui.Click("Written to us before? Get your earlier conversations");
+  Ui.Fill("Your email", "ana@example.test");
+  Ui.Click("Email me a code");
+  Assert.Visible("We sent a code to ana@example.test");
+  var code = "";
+  runas (Ada) {
+    foreach (var c in PointCheck.ToList()) { Workflow.Settle(c); }
+    var mail = Carried.Single(x => x.Subject == "Your code");
+    code = mail.Text.Substring(mail.Text.IndexOf("Your code is ") + 13, 6);
+  }
+  Ui.Fill("Code", code);
+  Ui.Shot("widget-prove-address");
+  Ui.Click("Show my conversations");
+  Assert.Visible("your earlier conversations with us are here now");
+  // The mailed conversation is this browser's now — the widget opens on the one that moved last, and reading it
+  // through the rules finds it.
+  runas (Ada) { Assert.Equal(1, PartyMerge.Count(m => m.Automatic)); }
+}
+
+[Test(Desk)]
+void the_desk_merges_a_probable_duplicate_from_the_party_card_and_can_undo_it() {
+  runas (Inbox) {
+    ReceiveInbound(new InboundMessage { ChannelKey = "email", Endpoint = "support@desk.test", From = "ana@example.test",
+                                        FromName = "Ana Lima", ExternalId = "<a1@example.test>", Subject = "Order", Text = "By mail." });
+    UnitOfWork.Commit();
+  }
+  runas (new Visitor { Id = "visit-ana" }) { StartConversation("In the chat.", "Chat", "Ana", "ana@example.test"); }
+  Guid chatter = Guid.Empty;
+  runas (Ada) { chatter = Message.Single(m => m.Text == "In the chat.").ByParty!.Id; }
+  Ui.SignInAs(Ada);
+  Ui.Visit($"/desk/party/{chatter}");
+  Assert.Visible("Probably the same person");
+  Assert.Visible("ana@example.test");
+  Ui.Shot("party-card");
+  Ui.Click("Merge Ana Lima into this one");
+  Assert.Visible("Ana Lima merged into Ana");
+  Ui.Shot("party-card-merged");
+  Ui.Click("Undo");
+  Assert.Visible("separated again");
+  runas (Ada) { Assert.Equal(MergeState.Undone, PartyMerge.Single().State); }
+}
+
+[Test(Desk)]
+void the_agent_sees_show_original_and_the_customer_sees_translated() {
+  // A visitor writes in Swedish.
+  Ui.Visit("/chat");
+  Ui.Fill("Your message", "Hej, jag har inte fått min beställning.");
+  Ui.Click("Start the conversation");
+  // Her language is learnt after her message is written (the kit's language run).
+  Background.Settle();
+  Guid id = Guid.Empty;
+  runas (Ada) {
+    var c = Conversation.Single(x => x.StartedByVisit != null);
+    id = c.Id;
+    Post(c, "It left the warehouse this morning.");
+    UnitOfWork.Commit();
+  }
+  // …and the reply's Swedish rendering is made after it is posted — it arrives on her open page as it is made.
+  Background.Settle();
+  // She reads the reply in Swedish, told it was translated.
+  Ui.AwaitChange(Osysharp.Conversations.MessageText);
+  Assert.Visible("[sv] It left the warehouse this morning.");
+  Assert.Visible("Translated from English");
+  Ui.Shot("widget-translated");
+  // The desk reads her message in English, and can see what she actually wrote.
+  Ui.SignInAs(Ada);
+  Ui.Visit($"/desk/{id}");
+  Assert.Visible("[en] Hej, jag har inte fått min beställning.");
+  Assert.Visible("Translated from Swedish");
+  Assert.Visible("Sent in Swedish");
+  Ui.Shot("desk-translated");
+  Ui.Click("Show original");
+  Assert.Visible("Hej, jag har inte fått min beställning.");
+}
+
+[Test(Desk)]
+[Skip("KNOWN-GAP: a UI test drives ONE browser at a time — `Ui.NewDevice()` closes the first — so a visitor cannot stay on the chat while the agent opens the desk. The platform half (a signed-out browser in a presence set, its visit id never sent) is AnonymousPresenceHttpTests; logged in osy_test_expressibility_gaps.md")]
+void the_desk_sees_a_signed_out_customer_on_the_page() {
+  // A visitor opens the chat and starts a conversation — signed out, no account, only a visit.
+  Ui.Visit("/chat");
+  Ui.Fill("Your message", "Hello, anyone there?");
+  Ui.Click("Start the conversation");
+  Assert.Visible("Hello, anyone there?");
+  Guid id = Guid.Empty;
+  runas (Ada) { id = Conversation.Single(x => x.StartedByVisit != null).Id; }
+  // The agent opens it on another device and is told the customer is on the page right now.
+  Ui.NewDevice();
+  Ui.SignInAs(Ada);
+  Ui.Visit($"/desk/{id}");
+  Assert.Visible("Hello, anyone there?");
+  Assert.Visible("The customer is here");
+  Ui.Shot("desk-customer-here");
+}
+
+[Test(Desk)]
+void the_chat_opens_from_the_corner_with_the_apps_help_above_the_first_message() {
+  Ui.Viewport(1280, 800);
+  Ui.Visit("/shop");
+  Assert.Hidden("Your message");
+  Ui.Click("Chat with us");
+  Assert.Visible("Ask the shop");
+  Assert.Visible("Opening hours: weekdays 9–17.");
+  Ui.Shot("launcher-open");
+  Ui.Fill("Your message", "Do you sell seeds?");
+  Ui.Click("Start the conversation");
+  Assert.Visible("Do you sell seeds?");
+  // Started, the app's help gives way to the conversation.
+  Assert.Hidden("Opening hours: weekdays 9–17.");
+  Ui.Fill("Your message", "And bulbs?");
+  Ui.Click("Send");
+  Assert.Visible("And bulbs?");
+  Ui.Click("Close the chat");
+  Assert.Hidden("Do you sell seeds?");
+  // The app heard both: the first message began the conversation.
+  runas (Ada) { Assert.Equal(["started: Do you sell seeds?", "wrote: And bulbs?"], Heard.OrderBy(h => h.CreatedAt).Select(h => h.Says).ToList()); }
+}

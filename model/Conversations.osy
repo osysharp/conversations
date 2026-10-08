@@ -1,0 +1,186 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum ParticipantRole {
+  [Label("Customer")] Customer,
+  [Label("Copied")] Cc,
+  [Label("Staff")] Staff,
+  [Label("AI agent")] Ai,
+  [Label("Observer")] Observer,
+}
+
+/// The "continue by email" clock on a chat participant (`WebFollowUp`).
+public enum FollowUpState {
+  [Label("None")] None,
+  [Label("Waiting")] Pending,
+  [Label("Mailed")] Sent,
+}
+
+/// How a message's text is shown (0.11.0). ⚠ Appended, never inserted: an enum is stored by position.
+public enum TextFormat {
+  /// As written — what customers and channels send. A fenced snippet is still shown as code, quoted mail folds.
+  Plain,
+  /// Markdown — bold, lists, links, code — as the desk's composer writes it (Osysharp.Composer).
+  Markdown,
+}
+
+/// Who may see an entry. IMMUTABLE once written, for everyone — an approved AI draft becomes a NEW customer-visible
+/// message pointing back at it; nothing ever flips.
+public enum EntryVisibility {
+  /// The customer sees it — a reply, their own message, an event they are told about.
+  [Label("Customer")] Customer,
+  /// Staff only — a note, an assignment, an SLA breach.
+  [Label("Internal")] Internal,
+  /// Staff only, written by or for an AI — a draft, a suggestion.
+  [Label("AI, internal")] AiInternal,
+}
+
+/// The caller IS this party: the account linked to it, the browser whose visit made it, or a browser it was continued
+/// in (a `Visitor` point — only ever the caller's own visit, `visitor-point-is-the-visitors-own`; the continue link adds
+/// one). Read by every customer grant in the kit — and never by a staff one.
+policy IsParty(Guid party) =>
+  Osysharp.Conversations.Party.Any(p => p.Id == party && (p.Account == user || p.CreatedByVisit == Visitor.Id))
+  || ContactPoint.Any(cp => cp.Party.Id == party && cp.Kind == ContactPointKind.Visitor && cp.Value == Visitor.Id);
+
+/// What an app's own kind of party grants its customers — the caller is this party (`IsParty`), or holds the continue
+/// link mailed to it (for the one call that link is opened in). Grants are never inherited, so the app says it once:
+///   `entity Customer : Party { security { allow read when IsConversationCustomer where IsCustomerParty(Id); } }`
+policy IsCustomerParty(Guid party) => IsParty(party) || party == ConversationContinueLink.Row;
+
+/// The caller is the party in this seat — `IsParty`, asked of a seat, so a page need not read the party to know.
+policy IsMySeat(Guid seat) =>
+  Participant.Any(s => s.Id == seat && s.LeftAt == null && s.Party != null
+    && (s.Party.Account == user || s.Party.CreatedByVisit == Visitor.Id
+        || ContactPoint.Any(cp => cp.Party == s.Party && cp.Kind == ContactPointKind.Visitor && cp.Value == Visitor.Id)));
+
+/// A customer-side caller IN THIS conversation: the party of one of its (present) seats.
+policy IsCustomerIn(Guid conversation) =>
+  Participant.Any(p => p.Conversation.Id == conversation && p.LeftAt == null && p.Party != null
+    && (p.Party.Account == user || p.Party.CreatedByVisit == Visitor.Id
+        || ContactPoint.Any(cp => cp.Party == p.Party && cp.Kind == ContactPointKind.Visitor && cp.Value == Visitor.Id)));
+
+/// One conversation: an ordered timeline of entries between the people in it, across every channel it travelled on.
+///
+/// ⚑ THE APP STATES ITS STAFF'S ACCESS (`partial entity Conversation { security { allow read, create, update when
+///   IsConversationStaff; } }`), so it is `Extensible`; this block grants the customer side, which the kit can state.
+[Authority(Extensible)]
+public entity Conversation {
+  [Classification(Personal.Content), MaxLength(300)] string? Subject;
+  [Required] DateTime StartedAt;
+  DateTime? LastEntryAt;
+  /// The last time the CUSTOMER wrote — what "waiting on us" and an SLA clock read (the Inbox kit's, not this one's).
+  DateTime? LastCustomerEntryAt;
+  /// Where a reply goes by default: the channel of the LAST inbound message ("web", "email") and our endpoint on it.
+  [MaxLength(40)] string ReplyChannel = "web";
+  [MaxLength(255)] string? ReplyEndpoint;
+  /// The visit that opened it from the widget — the bootstrap for its first participant. Stamped by the kit.
+  [MaxLength(64)] string? StartedByVisit;
+  /// The app's own name for it, the one people quote — a ticket number ("1419"). A channel that can carry it (a mail's
+  /// subject, `MailConversationChannel.SubjectReference`) writes it on replies and reads it back as a LAST resort, and
+  /// only ever together with the join check: a reference is guessable and admits nobody by itself (0.8.0).
+  [MaxLength(60)] string? Reference;
+  /// The conversation a message was split off from (`SplitOff`) — what a legal hold on that one still reaches. The kit's
+  /// alone: written once, by the split.
+  Conversation? SplitFrom;
+  /// The conversation this one was started BESIDE (`StartSideConversation`) — a side conversation: mail to somebody
+  /// outside about it (a supplier, a carrier), or a thread inside the team. Written once, by the start; read only by
+  /// staff — the person on the other end of a side conversation never learns the one it is beside.
+  Conversation? SideOf;
+  /// A side conversation set aside as done. The next message in it opens it again.
+  DateTime? SideClosedAt;
+  /// Whether this is a side conversation — readable by whoever reads it, unlike `SideOf`: it says that the desk started
+  /// it beside something, never what. What lets an answer written on the WEB ask for the line on the conversation it is
+  /// beside (`SideAnswerNote`) without the writer ever reading which conversation that is.
+  bool IsSide = false;
+  [ForeignKey(Conversation)] Participant[] Participants;
+  [ForeignKey(Conversation)] ConversationEntry[] Entries;
+
+  security {
+    // A customer reads the conversations they are in…
+    allow read when IsConversationCustomer where IsCustomerIn(Id);
+    // …opens one from the widget or the portal (its first seat is theirs, below)…
+    allow create when IsAnonymous || IsAuthenticated;
+    // …and moves its clocks by writing in it (the kit's `Reply` stamps them).
+    allow update LastEntryAt, LastCustomerEntryAt, ReplyChannel, ReplyEndpoint
+      when IsConversationCustomer where IsCustomerIn(Id);
+
+    // A non-staff caller opens a conversation only as its own visit.
+    deny create when !IsConversationStaff && !IsAuthenticator where StartedByVisit != Visitor.Id;
+    deny update StartedByVisit;
+    deny update StartedAt;
+    deny update Subject when !IsConversationStaff;
+    deny update Reference when !IsConversationStaff;
+    // Where it was split from is the split's to say, once — never an app's, and never moved.
+    deny create where SplitFrom != null;
+    deny update SplitFrom;
+    // SECURITY-INVARIANT(a-side-conversation-never-shows-its-parent): the person a side conversation is with is seated in
+    // it alone — never in the conversation it is beside — and never reads which one that is: a mail to a supplier about a
+    // customer's request must not hand the supplier a way to the customer's conversation. The side's start seats only
+    // them, carries none of the parent's reference or thread ids, and this mask keeps the link itself from them.
+    // Guarded by tests/sides.test.osy (the_person_a_side_conversation_is_with_never_sees_the_conversation_it_is_beside).
+    deny read SideOf when !IsConversationStaff;
+    deny create when !IsConversationStaff where SideOf != null;
+    deny update SideOf;
+    deny update SideClosedAt when !IsConversationStaff;
+    deny create when !IsConversationStaff where IsSide;
+    deny update IsSide;
+  }
+}
+
+/// A seat in a conversation — exactly one of a party (someone outside), a staff account, or an AI agent.
+[Unique(Conversation, Party)]
+[Unique(Conversation, Member)]
+[Authority(Extensible)]
+public entity Participant {
+  [Required] Conversation Conversation;
+  /// Someone outside — the customer, or someone copied.
+  Party? Party;
+  /// A staff account.
+  Principal? Member;
+  /// An AI agent, by name.
+  [MaxLength(200)] string? AgentName;
+  [Required] ParticipantRole Role;
+  [Required] DateTime JoinedAt;
+  DateTime? LeftAt;
+  /// Read state: the highest entry `Sequence` this participant has seen. Unread = the customer-visible entries above it.
+  int LastReadSequence;
+  DateTime? LastReadAt;
+  /// The web→mail continuation clock (`WebFollowUp`). `None` until its run starts — the first chat reply that waits on
+  /// this seat starts it — and the run's from then on.
+  FollowUpState FollowUp = FollowUpState.None;
+  /// When this seat's follow-up run was started (`WebFollowUp`): the first chat reply that waited on it. Null while none
+  /// has — and then the seat has no run at all, so a staff seat, and a customer nobody has answered in the chat, cost
+  /// nothing (SP-73). The kit's alone.
+  DateTime? FollowUpStartedAt;
+
+  invariant (Party != null ? 1 : 0) + (Member != null ? 1 : 0) + (AgentName != null ? 1 : 0) == 1
+    message "A participant is exactly one of a party, a staff account or an AI agent.";
+
+  security {
+    // A customer sees who is in their conversation.
+    allow read when IsConversationCustomer where IsCustomerIn(Conversation.Id);
+    // A customer seats THEMSELVES — their own party, as the customer — in a conversation they just opened…
+    allow create when IsConversationCustomer
+      where Role == ParticipantRole.Customer && Member == null && AgentName == null
+         && (Party.Account == user || Party.CreatedByVisit == Visitor.Id);
+    // …and moves their own read mark.
+    allow update LastReadSequence, LastReadAt when IsConversationCustomer where IsParty(Party.Id);
+
+    // SECURITY-INVARIANT(a-customer-cannot-seat-themself): seating yourself IS joining (the ember lesson). A non-staff
+    // caller may take a seat only in a conversation THEY opened — its `CreatedBy` (stamped by the platform) or the
+    // visit that started it — never in an existing one somebody else is having. Guarded by tests/security.test.osy
+    // (an_outsider_cannot_join_somebody_elses_conversation, a_visitor_cannot_join_a_conversation_another_visit_started).
+    deny create when !IsConversationStaff && !IsAuthenticator
+      where Conversation.CreatedBy != user.Id && Conversation.StartedByVisit != Visitor.Id;
+    deny update Conversation;
+    deny update Party;
+    deny update Member;
+    deny update AgentName;
+    deny update Role when !IsConversationStaff;
+    deny update FollowUp when !IsConversationStaff;
+    deny update FollowUpStartedAt when !IsConversationStaff;
+    deny create when !IsConversationStaff where FollowUpStartedAt != null;
+  }
+}

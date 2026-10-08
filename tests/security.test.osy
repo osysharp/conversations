@@ -1,0 +1,308 @@
+// Osysharp.Conversations — who reads and writes what. Visibility is enforced by rules, never by the composer: a
+// customer, a visitor and a stranger each try the thing they must not be able to do, and each test has the control
+// beside it (what they CAN do), so a refusal can only be the rule it names.
+//
+// The desk (Ada, staff), Cus and Dee (customers with portal accounts) and `PartyOf` are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+/// A conversation with Cus: a reply she sees, a note and an AI draft she must not, and a customer-visible event.
+Conversation WithNotes(string subject) {
+  var c = OpenConversation(PartyOf("cus@example.test"), subject);
+  UnitOfWork.Commit();
+  Post(c, "We've sent a replacement.");
+  Post(c, "She was rude on the phone — be careful.", EntryVisibility.Internal);
+  Post(c, "Draft: apologise and offer 10%.", EntryVisibility.AiInternal, "Triage");
+  Record(c, "desk.solved", "Desk", EntryVisibility.Customer);
+  Record(c, "inbox.assigned", "Desk");
+  UnitOfWork.Commit();
+  return c;
+}
+
+[Test(Desk)]
+void a_customer_reads_the_replies_but_never_the_notes() {
+  runas (Ada) { WithNotes("Replacement"); }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Replacement");
+    // Through every door: the subtype, the base, a count — two customer-visible entries, never the three others.
+    Assert.Equal(1, Message.Count(m => m.Conversation == c));
+    Assert.Equal("We've sent a replacement.", Message.Single(m => m.Conversation == c).Text);
+    Assert.Equal(2, ConversationEntry.Count(e => e.Conversation == c));
+    Assert.Equal(1, ConversationEvent.Count(e => e.Conversation == c));
+    Assert.Equal(0, Message.Count(m => m.Text.Contains("rude") || m.Text.Contains("Draft")));
+  }
+  // The control: the desk reads all five.
+  runas (Ada) { Assert.Equal(5, ConversationEntry.Count(e => e.Conversation.Subject == "Replacement")); }
+}
+
+[Test(Desk)]
+void a_visitor_reads_the_replies_but_never_the_notes() {
+  runas (new Visitor { Id = "visit-chat" }) { StartConversation("Where is my parcel?", "Parcel"); }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Subject == "Parcel");
+    Post(c, "It left the warehouse this morning.");
+    Post(c, "Courier is late again.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+  }
+  runas (new Visitor { Id = "visit-chat" }) {
+    var c = Conversation.Single(x => x.Subject == "Parcel");
+    Assert.Equal(2, Message.Count(m => m.Conversation == c));            // hers, and the reply
+    Assert.Equal(0, Message.Count(m => m.Text.Contains("Courier")));
+  }
+}
+
+[Test(Desk)]
+void a_customer_of_one_conversation_reads_nothing_of_another() {
+  runas (Ada) { WithNotes("Cus only"); }
+  runas (Dee) {
+    Assert.Equal(0, Conversation.Count(x => x.Subject == "Cus only"));
+    Assert.Equal(0, ConversationEntry.Count(e => e.Conversation.Subject == "Cus only"));
+    Assert.Equal(0, Participant.Count(p => p.Conversation.Subject == "Cus only"));
+  }
+  // …and neither does another browser that never took part.
+  runas (new Visitor { Id = "visit-stranger" }) {
+    Assert.Equal(0, Conversation.Count(x => x.Subject == "Cus only"));
+    Assert.Equal(0, Message.Count(m => m.Conversation.Subject == "Cus only"));
+  }
+  // The control: Cus does see it.
+  runas (Cus) { Assert.Equal(1, Conversation.Count(x => x.Subject == "Cus only")); }
+}
+
+[Test(Desk)]
+void a_customer_cannot_write_a_note_or_an_event() {
+  runas (Ada) { OpenConversation(PartyOf("cus@example.test"), "Forgery"); UnitOfWork.Commit(); }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Forgery");
+    var me = PartyOf("cus@example.test");
+    Assert.Denied(() => {
+      new Message { Conversation = c, At = DateTime.UtcNow, Visibility = EntryVisibility.Internal,
+                    Direction = MessageDirection.Inbound, ChannelKey = "web", Text = "a fake note", ByParty = me };
+      UnitOfWork.Commit();
+    });
+    Assert.Denied(() => {
+      new ConversationEvent { Conversation = c, At = DateTime.UtcNow, Visibility = EntryVisibility.Customer,
+                              Kind = "desk.refunded", Source = "Desk" };
+      UnitOfWork.Commit();
+    });
+    // The control: she can write her own customer-visible message.
+    Reply(c, "Just checking in.");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal(1, ConversationEntry.Count(e => e.Conversation.Subject == "Forgery")); }
+}
+
+/// Only the team writes markdown (0.11.0): a customer's message is never RENDERED, so a link in it is never dressed in
+/// words the customer chose ("[Your invoice](https://evil.test)") on the desk's screen.
+[Test(Desk)]
+void a_customer_cannot_write_a_message_the_desk_renders_as_markdown() {
+  runas (Ada) { OpenConversation(PartyOf("cus@example.test"), "Formatted"); UnitOfWork.Commit(); }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Formatted");
+    var me = PartyOf("cus@example.test");
+    Assert.Denied(() => {
+      new Message { Conversation = c, At = DateTime.UtcNow, Visibility = EntryVisibility.Customer, Format = TextFormat.Markdown,
+                    Direction = MessageDirection.Inbound, ChannelKey = "web", Text = "[Your invoice](https://evil.test)", ByParty = me };
+      UnitOfWork.Commit();
+    });
+    // The control: the same words, plain, are hers to write.
+    new Message { Conversation = c, At = DateTime.UtcNow, Visibility = EntryVisibility.Customer,
+                  Direction = MessageDirection.Inbound, ChannelKey = "web", Text = "[Your invoice](https://evil.test)", ByParty = me };
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Subject == "Formatted");
+    Assert.Equal(TextFormat.Plain, Message.Single(m => m.Conversation == c).Format);
+    // The desk's composer writes markdown.
+    Post(c, "**Refund** on its way.", format: TextFormat.Markdown);
+    UnitOfWork.Commit();
+    Assert.Equal(1, Message.Count(m => m.Conversation == c && m.Format == TextFormat.Markdown));
+  }
+}
+
+[Test(Desk)]
+void a_customer_cannot_post_a_message_as_the_desk() {
+  Osysharp.Conversations.Party? dee = null;
+  runas (Ada) {
+    OpenConversation(PartyOf("cus@example.test"), "As the desk");
+    UnitOfWork.Commit();
+    dee = PartyOf("dee@example.test");
+  }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "As the desk");
+    var me = PartyOf("cus@example.test");
+    // An OUTBOUND message — words put in the desk's mouth.
+    Assert.Denied(() => {
+      new Message { Conversation = c, At = DateTime.UtcNow, Visibility = EntryVisibility.Customer,
+                    Direction = MessageDirection.Outbound, ChannelKey = "web", Text = "Refund approved!", ByParty = me };
+      UnitOfWork.Commit();
+    });
+    // …or one signed with another author.
+    Assert.Denied(() => {
+      new Message { Conversation = c, At = DateTime.UtcNow, Visibility = EntryVisibility.Customer,
+                    Direction = MessageDirection.Inbound, ChannelKey = "web", Text = "from Dee", ByParty = dee };
+      UnitOfWork.Commit();
+    });
+  }
+  runas (Ada) { Assert.Equal(0, ConversationEntry.Count(e => e.Conversation.Subject == "As the desk")); }
+}
+
+[Test(Desk)]
+void an_internal_note_can_never_be_made_visible_even_by_staff() {
+  runas (Ada) { WithNotes("Flip"); }
+  runas (Ada) {
+    var note = Message.Single(m => m.Text.Contains("rude"));
+    Assert.Denied(() => { note.Visibility = EntryVisibility.Customer; UnitOfWork.Commit(); });
+  }
+  runas (Cus) { Assert.Equal(0, Message.Count(m => m.Text.Contains("rude"))); }
+}
+
+[Test(Desk)]
+void an_approved_ai_draft_becomes_a_new_message_and_the_draft_stays_internal() {
+  runas (Ada) { WithNotes("Approve"); }
+  runas (Ada) {
+    var draft = Message.Single(m => m.Text.StartsWith("Draft:"));
+    var sent = ApproveDraft(draft, "Sorry for the trouble — here is 10% off your next order.");
+    UnitOfWork.Commit();
+    Assert.Equal(EntryVisibility.Customer, sent.Visibility);
+    Assert.Equal(draft.Id, sent.ApprovedFrom.Id);
+    Assert.Equal(EntryVisibility.AiInternal, Message.Single(m => m.Id == draft.Id).Visibility);
+  }
+  runas (Cus) {
+    Assert.Equal(1, Message.Count(m => m.Text.StartsWith("Sorry for the trouble")));
+    Assert.Equal(0, Message.Count(m => m.Text.StartsWith("Draft:")));
+  }
+}
+
+[Test(Desk)]
+void an_outsider_cannot_join_somebody_elses_conversation() {
+  Conversation? leaked = null;
+  runas (Ada) { leaked = WithNotes("Private"); }
+  // She cannot even find it…
+  runas (Dee) { Assert.Equal(0, Conversation.Count(x => x.Subject == "Private")); }
+  // …and holding a reference to it (it leaked: a link, a log) she still cannot take a seat in it.
+  runas (Dee) {
+    var mine = PartyOf("dee@example.test");
+    Assert.Denied(() => {
+      new Participant { Conversation = leaked!, Party = mine, Role = ParticipantRole.Customer, JoinedAt = DateTime.UtcNow };
+      UnitOfWork.Commit();
+    });
+  }
+  runas (Ada) { Assert.Equal(2, Participant.Count(p => p.Conversation.Subject == "Private")); }
+}
+
+[Test(Desk)]
+void a_visitor_cannot_join_a_conversation_another_visit_started() {
+  Conversation? leaked = null;
+  runas (new Visitor { Id = "visit-owner" }) { leaked = StartConversation("My own question.", "Owned"); }
+  runas (new Visitor { Id = "visit-intruder" }) {
+    var mine = VisitorParty("Mallory");
+    UnitOfWork.Commit();
+    Assert.Denied(() => {
+      new Participant { Conversation = leaked!, Party = mine, Role = ParticipantRole.Customer, JoinedAt = DateTime.UtcNow };
+      UnitOfWork.Commit();
+    });
+    Assert.Equal(0, Message.Count(m => m.Text == "My own question."));
+  }
+  // The control: the visit that started it reads it.
+  runas (new Visitor { Id = "visit-owner" }) { Assert.Equal(1, Message.Count(m => m.Text == "My own question.")); }
+}
+
+[Test(Desk)]
+void a_rendering_of_a_note_is_as_internal_as_the_note() {
+  runas (Ada) {
+    WithNotes("Rendered");
+    var note = Message.Single(m => m.Text.Contains("rude"));
+    var reply = Message.Single(m => m.Text == "We've sent a replacement.");
+    new MessageText { Message = note, Language = "sv", Text = "Hon var otrevlig i telefon.", Source = TextSource.Machine };
+    new MessageText { Message = reply, Language = "sv", Text = "Vi har skickat en ersättning.", Source = TextSource.Machine,
+                      WasDelivered = true };
+    UnitOfWork.Commit();
+  }
+  runas (Cus) {
+    Assert.Equal(1, MessageText.Count());
+    Assert.Equal("Vi har skickat en ersättning.", MessageText.Single().Text);
+  }
+}
+
+[Test(Desk)]
+void nobody_but_the_sign_in_flow_links_a_party_to_an_account() {
+  runas (new Visitor { Id = "visit-claim" }) { StartConversation("Hi, I'm Dee.", "Claim", "Dee?"); }
+  // Not the visitor (claiming an account would open its every conversation to this browser)…
+  runas (Cus) {
+    Assert.Denied(() => {
+      new ConversationsKitTests.Party { DisplayName = "Mine now", Account = Person.Single(p => p.Email == "cus@example.test") };
+      UnitOfWork.Commit();
+    });
+  }
+  // …and not the desk either: an agent's say-so is not the sign-in flow's proof.
+  runas (Ada) {
+    var visitParty = Participant.Single(p => p.Conversation.Subject == "Claim" && p.Party != null).Party!;
+    Assert.Denied(() => {
+      visitParty.Account = Person.Single(p => p.Email == "eve@example.test");
+      UnitOfWork.Commit();
+    });
+  }
+}
+
+[Test(Desk)]
+void a_member_cannot_write_in_a_colleagues_name() {
+  runas (Ada) {
+    OpenConversation(PartyOf("cus@example.test"), "Whose words");
+    UnitOfWork.Commit();
+  }
+  runas (Inbox) {
+    var ada = Person.Single(p => p.Email == "ada@desk.test");
+    var c = Conversation.Single(x => x.Subject == "Whose words");
+    // Staff, writing a reply — in Ada's name. Refused: a member's entry is that member's.
+    Assert.Denied(() => {
+      new Message { Conversation = c, At = DateTime.UtcNow, Visibility = EntryVisibility.Customer,
+                    Direction = MessageDirection.Outbound, ChannelKey = "web", Text = "Ada says yes", ByMember = ada,
+                    ByName = "Ada" };
+      UnitOfWork.Commit();
+    });
+    // …while the same staff member writes in their own name freely — the refusal is the name, not the write.
+    Post(c, "In my own name.");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    Assert.Equal(0, Message.Count(m => m.Text == "Ada says yes"));
+    Assert.Equal(1, Message.Count(m => m.Text == "In my own name." && m.ByName == "Inbox"));
+  }
+}
+
+/// A customer reads their own party and its points, never another customer's — and adds a point only to their own. The
+/// desk writes both parties' points first: a staff write no longer asks the customer grants beside the staff one (the
+/// commit's fold asks a row-filtered allow only when it could still decide — SP-73), so this is the test that the
+/// customer grants still hold for the customers they are for.
+[Test(Desk)]
+void a_customer_reads_their_own_party_and_points_and_never_another_customers() {
+  Osysharp.Conversations.Party? cus = null;
+  runas (Ada) {
+    cus = PartyOf("cus@example.test");
+    new ContactPoint { Party = cus!, Kind = ContactPointKind.Email, Value = "cus.home@example.test" };
+    new ContactPoint { Party = PartyOf("dee@example.test"), Kind = ContactPointKind.Email, Value = "dee.home@example.test" };
+    UnitOfWork.Commit();
+  }
+  runas (Dee) {
+    // Neither Cus's party nor its points are hers to read, whatever she asks for…
+    Assert.Equal(0, Osysharp.Conversations.Party.Count(p => p.DisplayName == "Cus"));
+    Assert.Equal(0, ContactPoint.Count(p => p.Value == "cus.home@example.test"));
+    Assert.Equal(1, Osysharp.Conversations.Party.Count());
+    Assert.Equal(1, ContactPoint.Count(p => p.Value == "dee.home@example.test"));
+    // …nor is it hers to add to.
+    Assert.Denied(() => {
+      new ContactPoint { Party = cus!, Kind = ContactPointKind.Email, Value = "planted@example.test" };
+      UnitOfWork.Commit();
+    });
+    // The control: she claims an address on her own party.
+    new ContactPoint { Party = PartyOf("dee@example.test"), Kind = ContactPointKind.Email, Value = "dee.work@example.test" };
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    Assert.Equal(0, ContactPoint.Count(p => p.Value == "planted@example.test"));
+    Assert.Equal(2, ContactPoint.Count(p => p.Value.StartsWith("dee.")));
+  }
+}
+

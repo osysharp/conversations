@@ -1,0 +1,365 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+
+// ATTACHMENTS (0.8.0, slice 7) — a screenshot of something that looks wrong, the source file a bug is in, the log, a
+// mail's PDF. A file rides on a MESSAGE and is readable exactly where that message is: the file is an `[Attachment]` of
+// its `MessageAttachment` row, whose rules are the message's — so a customer reads the screenshot on a reply to them and
+// never the one on an internal note, and nobody reads another conversation's (SECURITY-INVARIANT
+// a-file-is-readable-where-its-row-is, the platform's; conversation-internal-stays-internal, this kit's).
+//
+// ⚑ WHAT A FILE IS, IS READ FROM ITS BYTES, NOT ITS NAME. `screenshot.png` is shown as a picture only when it IS a picture;
+//   a name that lies is refused on upload and kept as a plain download when it arrives by mail (a mail is never lost).
+//   HTML and SVG are never shown as what they are — only as their source, escaped — and every download carries
+//   `Content-Disposition: attachment` and `nosniff`.
+//
+// ⚑ LIMITS ARE SENTENCES. `MaxFileBytes` (10 MB) and `MaxMessageBytes` (25 MB) are the app's to set; over either, the
+//   writer is told which file, how big, and what the limit is, while they can still do something about it.
+
+/// What kind of file a message carries — decided from its BYTES — and so how the timeline shows it.
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum AttachmentKind {
+  /// A PNG, JPEG, GIF or WebP picture — shown in the message, opened large on a click.
+  [Label("Picture")] Image,
+  /// Source code or another text file in a language the timeline colours — shown with line numbers.
+  [Label("Code")] Code,
+  /// Text with no language to colour (a log, a CSV) — shown as plain lines.
+  [Label("Text")] Text,
+  /// A ZIP archive — its listing is shown, never its contents.
+  [Label("Archive")] Archive,
+  [Label("PDF")] Pdf,
+  /// Anything else — a download.
+  [Label("File")] Other,
+}
+
+/// A file a message carries.
+[Authority(Extensible)]
+public entity MessageAttachment {
+  [Required] Message Message;
+  /// The file. An ATTACHMENT of this row: readable by exactly whoever may read this row, and so the message.
+  [Required, Attachment] FileAsset File;
+  /// The name it came with — shown, and given back on download.
+  [Required, Classification(Personal.Content), MaxLength(255)] string FileName;
+  /// Its REAL type, read from the bytes (`image/png`, `text/x-csharp`, `application/zip`).
+  [Required, MaxLength(100)] string ContentType;
+  long Size;
+  AttachmentKind Kind;
+  /// The language a Code file is coloured as ("csharp", "typescript") — "" for anything else.
+  [MaxLength(40)] string Language = "";
+  /// Shown INSIDE the message — a pasted screenshot, a picture a mail placed in its body — rather than only listed.
+  bool Inline;
+  /// A mail's `cid:` for a picture its HTML placed — what the original refers to it by.
+  [MaxLength(127)] string ContentId = "";
+  /// The person this file is ABOUT — their ID, a letter about them — so their erasure takes it (`MarkFileAbout`). Set by
+  /// the desk, never inferred: a file is not about somebody because they sent it (Privacy Q7).
+  Party? About;
+
+  security {
+    // A customer reads the files on the customer-visible messages of the conversations they are in…
+    allow read when IsConversationCustomer
+      where Message.Visibility == EntryVisibility.Customer && IsCustomerIn(Message.Conversation.Id);
+    // …and attaches to their OWN message, written on the web.
+    allow create when IsConversationCustomer
+      where Message.Direction == MessageDirection.Inbound && Message.Visibility == EntryVisibility.Customer
+         && Message.ChannelKey == "web" && IsCustomerIn(Message.Conversation.Id) && IsParty(Message.ByParty.Id);
+
+    // SECURITY-INVARIANT(conversation-internal-stays-internal): a note's files are as internal as the note — whatever an
+    // app grants. Guarded by tests/attachments.test.osy (a_note_s_file_is_never_the_customer_s).
+    deny read when !IsConversationStaff where Message.Visibility != EntryVisibility.Customer;
+    deny create when !IsConversationStaff where Message.Visibility != EntryVisibility.Customer;
+    // Only the desk says whom a file is about — never the person sending it (it decides what their erasure takes).
+    deny create when !IsConversationStaff where About != null;
+    deny update About when !IsConversationStaff;
+    // A file never moves to another message, and is never swapped for another file.
+    deny update Message;
+    deny update File;
+    deny update Kind;
+    deny update ContentType;
+  }
+}
+
+/// A file arriving on a channel — plain data, as an adapter hands it over (a mail's attachment).
+public class InboundFile {
+  public string FileName = "";
+  /// The type the channel SAID it is; the kit reads the real one from the bytes.
+  public string ContentType = "";
+  public string ContentId = "";
+  public bool Inline;
+  public byte[] Content = [];
+}
+
+/// A file going out on a channel with a reply — what an adapter attaches to the mail it sends.
+public class OutboundFile {
+  public string FileName = "";
+  public string ContentType = "";
+  public string ContentId = "";
+  public byte[] Content = [];
+}
+
+/// Attach files the writer already stored (`File.Create`, or an upload) to their message. Each is checked: what it really
+/// is, from its bytes, against its name; and the size limits, said as sentences. Only someone who may share a file can
+/// attach it — the platform refuses anything else at the commit.
+public List<MessageAttachment> Attach(Message message, List<FileAsset> files) {
+  var setup = App.Setting<ConversationsSetup>();
+  List<MessageAttachment> made = [];
+  long total = MessageAttachment.Where(a => a.Message == message).Sum(a => a.Size);
+  foreach (var file in files) {
+    var bytes = File.ReadAllBytes(file);
+    total = total + bytes.Length;
+    CheckSize(file.Name, bytes.Length, total, setup);
+    var seen = WhatIs(file.Name, bytes);
+    if (seen.Lie != "") { throw new ValidationException(seen.Lie); }
+    made.Add(new MessageAttachment {
+      Message = message, File = file, FileName = file.Name, ContentType = seen.ContentType, Size = bytes.Length,
+      Kind = seen.Kind, Language = seen.Language, Inline = seen.Kind == AttachmentKind.Image,
+    });
+  }
+  return made;
+}
+
+/// Store and attach files that ARRIVED on a channel (a mail's attachments). Kept whatever they are — a mail is never
+/// lost — but a name that lies about what the bytes are is shown as a plain download, under its real type. Size limits
+/// do not refuse a mail that has already arrived; a file over them is kept as a download.
+public List<MessageAttachment> AttachReceived(Message message, List<InboundFile> files) {
+  List<MessageAttachment> made = [];
+  foreach (var f in files) {
+    if (f.Content.Length == 0) { continue; }
+    var name = SafeFileName(f.FileName);
+    var seen = WhatIs(name, f.Content);
+    var kind = seen.Lie != "" ? AttachmentKind.Other : seen.Kind;
+    var file = File.Create(name, seen.Lie != "" ? "application/octet-stream" : seen.ContentType, f.Content);
+    made.Add(new MessageAttachment {
+      Message = message, File = file, FileName = name,
+      ContentType = seen.Lie != "" ? "application/octet-stream" : seen.ContentType, Size = f.Content.Length,
+      Kind = kind, Language = kind == AttachmentKind.Code ? seen.Language : "",
+      Inline = f.Inline && kind == AttachmentKind.Image, ContentId = f.ContentId,
+    });
+  }
+  return made;
+}
+
+void CheckSize(string name, long size, long total, ConversationsSetup setup) {
+  if (size > setup.MaxFileBytes) {
+    throw new ValidationException($"{name} is {Megabytes(size)}, and a file may be at most {Megabytes(setup.MaxFileBytes)}. "
+      + "Send a smaller one — a cropped screenshot, or the part of the log that matters.");
+  }
+  if (total > setup.MaxMessageBytes) {
+    throw new ValidationException($"These files come to {Megabytes(total)}, and one message may carry at most "
+      + $"{Megabytes(setup.MaxMessageBytes)}. Send some of them in a second message.");
+  }
+}
+
+/// "3.4 MB", "820 KB".
+public string Megabytes(long bytes) {
+  if (bytes < 1024 * 1024) { return Convert.ToString((bytes + 1023) / 1024) + " KB"; }
+  return Math.Round((decimal)bytes / (1024m * 1024m), 1).ToString() + " MB";
+}
+
+/// What a file IS — its kind, its real type and, for code, its language — read from its bytes. `Lie` is a sentence when
+/// the name claims something the bytes are not (a `.png` that is no picture), "" otherwise.
+public FileSeen WhatIs(string name, byte[] bytes) {
+  var ext = ExtensionOf(name);
+  var magic = MagicType(bytes);
+  if (magic != "") {
+    var kind = magic.StartsWith("image/") ? AttachmentKind.Image
+      : magic == "application/pdf" ? AttachmentKind.Pdf
+      : magic == "application/zip" ? AttachmentKind.Archive : AttachmentKind.Other;
+    // A picture under a picture's name, a PDF under .pdf, a ZIP under any archive-ish name: as named. A name that
+    // claims a DIFFERENT picture or document is a lie only when it claims something shown in the timeline.
+    var claimed = TypeOfExtension(ext);
+    if (claimed.StartsWith("image/") && !magic.StartsWith("image/")) {
+      return new FileSeen { Kind = AttachmentKind.Other, ContentType = magic,
+        Lie = $"{name} is named as a picture, but it is not one — it is {Describe(magic)}. Rename it, or send the picture itself." };
+    }
+    return new FileSeen { Kind = kind, ContentType = magic };
+  }
+  // No signature of a known binary: a picture's name is a lie (every picture we show has one).
+  if (TypeOfExtension(ext).StartsWith("image/")) {
+    return new FileSeen { Kind = AttachmentKind.Other, ContentType = "application/octet-stream",
+      Lie = $"{name} is named as a picture, but it does not contain one. Send the picture itself." };
+  }
+  if (IsText(bytes)) {
+    var language = LanguageOfExtension(ext);
+    return new FileSeen {
+      Kind = language != "" ? AttachmentKind.Code : AttachmentKind.Text,
+      ContentType = language != "" ? "text/x-" + language : (ext == "csv" ? "text/csv" : "text/plain"),
+      Language = language,
+    };
+  }
+  return new FileSeen { Kind = AttachmentKind.Other, ContentType = "application/octet-stream" };
+}
+
+/// What `WhatIs` read.
+public class FileSeen {
+  public AttachmentKind Kind = AttachmentKind.Other;
+  public string ContentType = "application/octet-stream";
+  public string Language = "";
+  public string Lie = "";
+}
+
+/// The type a file's first bytes declare — the signatures of the formats the timeline shows — or "".
+string MagicType(byte[] b) {
+  if (b.Length >= 8 && b[0] == 137 && b[1] == 80 && b[2] == 78 && b[3] == 71) { return "image/png"; }
+  if (b.Length >= 3 && b[0] == 255 && b[1] == 216 && b[2] == 255) { return "image/jpeg"; }
+  if (b.Length >= 6 && b[0] == 71 && b[1] == 73 && b[2] == 70 && b[3] == 56) { return "image/gif"; }
+  if (b.Length >= 12 && b[0] == 82 && b[1] == 73 && b[2] == 70 && b[3] == 70
+      && b[8] == 87 && b[9] == 69 && b[10] == 66 && b[11] == 80) { return "image/webp"; }
+  if (b.Length >= 5 && b[0] == 37 && b[1] == 80 && b[2] == 68 && b[3] == 70 && b[4] == 45) { return "application/pdf"; }
+  if (b.Length >= 4 && b[0] == 80 && b[1] == 75 && (b[2] == 3 || b[2] == 5) && (b[3] == 4 || b[3] == 6)) {
+    return "application/zip";
+  }
+  return "";
+}
+
+/// Text: no NUL in the first 8000 bytes, and the whole reads as UTF-8 without a replacement character (U+FFFD).
+bool IsText(byte[] b) {
+  var n = b.Length < 8000 ? b.Length : 8000;
+  for (var i = 0; i < n; i++) { if (b[i] == 0) { return false; } }
+  return !Encoding.UTF8.GetString(b).Contains("�");
+}
+
+/// The extension, lower-cased, without its dot — "" for none.
+string ExtensionOf(string name) {
+  var dot = name.LastIndexOf(".");
+  return dot < 0 || dot == name.Length - 1 ? "" : name.Substring(dot + 1).ToLower();
+}
+
+string TypeOfExtension(string ext) {
+  if (ext == "png") { return "image/png"; }
+  if (ext == "jpg" || ext == "jpeg") { return "image/jpeg"; }
+  if (ext == "gif") { return "image/gif"; }
+  if (ext == "webp") { return "image/webp"; }
+  if (ext == "pdf") { return "application/pdf"; }
+  if (ext == "zip") { return "application/zip"; }
+  return "";
+}
+
+string Describe(string type) {
+  if (type.StartsWith("image/")) { return "a " + type.Substring(6).ToUpper() + " picture"; }
+  if (type == "application/pdf") { return "a PDF"; }
+  if (type == "application/zip") { return "a ZIP archive"; }
+  return "a file of another kind";
+}
+
+/// The language a source file is coloured as, by its extension — "" for a file that is not code.
+public string LanguageOfExtension(string ext) {
+  if (ext == "cs" || ext == "csx") { return "csharp"; }
+  if (ext == "osy") { return "osysharp"; }
+  if (ext == "ts" || ext == "tsx") { return "typescript"; }
+  if (ext == "js" || ext == "jsx" || ext == "mjs" || ext == "cjs") { return "javascript"; }
+  if (ext == "py") { return "python"; }
+  if (ext == "java") { return "java"; }
+  if (ext == "kt" || ext == "kts") { return "kotlin"; }
+  if (ext == "go") { return "go"; }
+  if (ext == "rs") { return "rust"; }
+  if (ext == "rb") { return "ruby"; }
+  if (ext == "php") { return "php"; }
+  if (ext == "swift") { return "swift"; }
+  if (ext == "c" || ext == "h") { return "c"; }
+  if (ext == "cpp" || ext == "cc" || ext == "hpp") { return "cpp"; }
+  if (ext == "sql") { return "sql"; }
+  if (ext == "sh" || ext == "bash" || ext == "zsh") { return "shell"; }
+  if (ext == "json") { return "json"; }
+  if (ext == "yaml" || ext == "yml") { return "yaml"; }
+  if (ext == "xml" || ext == "csproj" || ext == "props") { return "xml"; }
+  // HTML and SVG are code here: shown as their SOURCE, escaped — never rendered.
+  if (ext == "html" || ext == "htm" || ext == "svg") { return "html"; }
+  if (ext == "css" || ext == "scss") { return "css"; }
+  if (ext == "md") { return "markdown"; }
+  return "";
+}
+
+/// A file name safe to store and give back: no path, no control characters, at most 255 characters.
+public string SafeFileName(string name) {
+  var n = name.Replace("\\", "/");
+  var slash = n.LastIndexOf("/");
+  if (slash >= 0) { n = n.Substring(slash + 1); }
+  n = Regex.Replace(n, "[\\x00-\\x1F\\x7F\"<>|:*?]", "_").Trim();
+  if (n == "" || n == "." || n == "..") { n = "attachment"; }
+  return n.Length > 255 ? n.Substring(n.Length - 255) : n;
+}
+
+// ── files a person adds in a composer ───────────────────────────────────────────────────────────────────────────────
+
+/// A file a person pasted, dropped or picked in a composer, kept and waiting to go with their next message.
+public class PendingFile {
+  public Guid Id;
+  public string Name = "";
+  public AttachmentKind Kind = AttachmentKind.Other;
+  public long Size;
+}
+
+/// Keep an upload — `Upload(onUploaded:)`, or a paste or drop (`onFile:`) — as the caller's OWN file, ready to go with
+/// their next message: a signed-in person's is theirs, a signed-out visitor's is their visit's, and nobody else can read
+/// or attach it. What it is, is read from its bytes and checked against its name; the size limit is a sentence. Only a
+/// PRIVATE upload (a path the server chose under `uploads/`) is taken, only by the browser or the person that uploaded it,
+/// and it is removed from there once kept.
+///
+/// SECURITY-INVARIANT(a-private-upload-is-its-uploaders): an upload is kept only by its uploader (`File.IsOwnUpload`) — a
+/// path that leaks cannot be attached by another session. Guarded by tests/files.test.osy
+/// (an_upload_is_kept_only_by_the_browser_or_the_person_that_made_it).
+[AllowAnonymous]
+public PendingFile KeepUpload(UploadedFile upload) {
+  if (!upload.Path.StartsWith("uploads/")) {
+    throw new ValidationException("Only a file just uploaded privately can be attached — upload it with `privately: true`.");
+  }
+  if (!File.IsOwnUpload(upload.Path)) {
+    throw new ValidationException("That file was uploaded somewhere else — in another browser, or before you signed out. Please upload it again.");
+  }
+  var setup = App.Setting<ConversationsSetup>();
+  var bytes = File.ReadAllBytes(upload.Path);
+  var name = SafeFileName(upload.FileName);
+  CheckSize(name, bytes.Length, bytes.Length, setup);
+  var seen = WhatIs(name, bytes);
+  if (seen.Lie != "") { throw new ValidationException(seen.Lie); }
+  var file = File.Create(name, seen.ContentType, bytes);
+  File.Delete(upload.Path);
+  UnitOfWork.Commit();
+  return new PendingFile { Id = file.Id, Name = name, Kind = seen.Kind, Size = bytes.Length };
+}
+
+/// The caller's files among `ids`, in the order given — what a composer sends. An id the caller cannot read is not
+/// there to send, so it is simply absent; attaching one they can read but not share is refused at the commit.
+public List<FileAsset> OwnFiles(List<Guid>? ids) {
+  List<FileAsset> files = [];
+  if (ids == null) { return files; }
+  foreach (var id in ids) {
+    var file = FileAsset.FirstOrDefault(f => f.Id == id);
+    if (file != null) { files.Add(file); }
+  }
+  return files;
+}
+
+/// What the timeline shows of an attachment beyond its name: a text or code file's first lines, coloured; a ZIP's
+/// listing. Read through the rules — an attachment the caller may not read is not there to preview.
+public class AttachmentPreview {
+  public List<CodeLine> Lines = [];
+  /// The file has more lines than are shown.
+  public bool Truncated;
+  public int TotalLines;
+  /// A ZIP's entries, in archive order (a folder ends in `/`) — at most the first 200.
+  public List<string> Entries = [];
+  public int MoreEntries;
+}
+
+[AllowAnonymous]
+public AttachmentPreview PreviewOf(Guid attachmentId) {
+  var preview = new AttachmentPreview();
+  var attached = MessageAttachment.FirstOrDefault(a => a.Id == attachmentId);
+  if (attached == null) { return preview; }
+  var bytes = File.ReadAllBytes(attached.File);
+  if (attached.Kind == AttachmentKind.Archive) {
+    foreach (var name in Zip.List(bytes)) {
+      if (preview.Entries.Count < 200) { preview.Entries.Add(name); } else { preview.MoreEntries++; }
+    }
+    return preview;
+  }
+  if (attached.Kind == AttachmentKind.Code || attached.Kind == AttachmentKind.Text) {
+    var text = Encoding.UTF8.GetString(bytes);
+    preview.TotalLines = LinesOf(text).Count;
+    preview.Lines = Highlight(text, attached.Language, 400);
+    preview.Truncated = preview.TotalLines > preview.Lines.Count;
+  }
+  return preview;
+}

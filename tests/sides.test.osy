@@ -1,0 +1,244 @@
+// SIDE CONVERSATIONS — the desk mails somebody outside, or opens a thread inside the team, BESIDE a conversation: its own
+// seats, subject and thread; the other side's answer lands in it (and the conversation it is beside is told); the other
+// side never sees the conversation it is beside, and that conversation's customer never sees the side one.
+//
+// Cus has a broken order; Dee (with an account here, so a test can read as Dee) is the carrier the desk asks.
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+/// What the desk has before it mails Dee: Cus's conversation — a reply, a note and a reference — and Dee's address.
+Guid BrokenOrder() {
+  Guid id = Guid.Empty;
+  runas (Ada) {
+    var c = OpenConversation(PartyOf("cus@example.test"), "Order 1001 arrived broken");
+    c.Reference = "1001";
+    new ContactPoint { Party = PartyOf("dee@example.test"), Kind = ContactPointKind.Email, Value = "dee@example.test", IsPreferred = true };
+    UnitOfWork.Commit();
+    Post(c, "Sorry about that — we are asking the carrier now.");
+    Post(c, "Carrier is Northline; the claim number is CL-99.", EntryVisibility.Internal);
+    UnitOfWork.Commit();
+    id = c.Id;
+  }
+  return id;
+}
+
+/// The lines on a conversation's timeline, said for the reader.
+[SuppressWarning("cost-unbounded-read")]   // one conversation of a test's own small world
+List<string> SaidOn(Guid conversationId) {
+  List<string> said = [];
+  foreach (var e in ConversationEvent.Where(x => x.Conversation.Id == conversationId).OrderBy(x => x.Sequence).ToList()) {
+    said.Add(EventWords(e));
+  }
+  return said;
+}
+
+/// ⭐ SECURITY-INVARIANT(a-side-conversation-never-shows-its-parent). Dee reads the side conversation they are in — and
+/// nothing of Cus's conversation: not the conversation, not one entry, not even which one it is. What Dee was mailed
+/// carries the side's subject, text and thread — none of Cus's words, ids or reference. And Cus reads nothing of the side.
+[Test(Desk)]
+void the_person_a_side_conversation_is_with_never_sees_the_conversation_it_is_beside() {
+  var parent = BrokenOrder();
+  Guid side = Guid.Empty;
+  runas (Ada) {
+    var s = StartSideConversation(Conversation.Single(c => c.Id == parent), "Damaged parcel",
+                                  "Can you check the parcel you delivered on Monday?", PartyOf("dee@example.test"));
+    UnitOfWork.Commit();
+    DeliverAll();
+    side = s.Id;
+  }
+  runas (Dee) {
+    Assert.Equal(1, Conversation.Count(c => c.Id == side));
+    Assert.Equal(1, Message.Count(m => m.Conversation.Id == side));
+    Assert.Equal(0, Conversation.Count(c => c.Id == parent));
+    Assert.Equal(0, ConversationEntry.Count(e => e.Conversation.Id == parent));
+    Assert.Null(Conversation.Single(c => c.Id == side).SideOf);
+  }
+  runas (Ada) {
+    var sent = Carried.Single(x => x.To == "dee@example.test");
+    Assert.Equal("Damaged parcel", sent.Subject);
+    Assert.Equal("Can you check the parcel you delivered on Monday?", sent.Text);
+    Assert.DoesNotContain("1001", sent.Subject + sent.Text);
+    foreach (var k in ConversationThreadKey.Where(x => x.Conversation.Id == parent).Select(x => x.Key).ToList()) {
+      Assert.DoesNotContain(k, sent.ThreadKeys);
+    }
+    // It was mailed to Dee alone.
+    Assert.Equal(1, Carried.Count(x => x.Text.Contains("parcel you delivered")));
+    // The desk reads it on Cus's conversation — the start, and the card's facts.
+    Assert.Contains("A side conversation with Dee was started: “Damaged parcel”.", SaidOn(parent));
+    Assert.Equal(side, ConversationEvent.Single(e => e.Conversation.Id == parent && e.Kind == "conversations.side-started").Side!.Id);
+  }
+  runas (Cus) {
+    Assert.Equal(0, Conversation.Count(c => c.Id == side));
+    Assert.Equal(0, ConversationEntry.Count(e => e.Conversation.Id == side));
+    Assert.Equal(0, ConversationEvent.Count(e => e.Conversation.Id == parent && e.Kind.StartsWith("conversations.side")));
+  }
+}
+
+/// Dee answers the mail: the answer lands in the side conversation — never in Cus's, never a new one — and Cus's
+/// conversation says so, for the desk. A side conversation set aside as done is open again.
+[Test(Desk)]
+void an_answer_by_mail_lands_in_the_side_conversation_and_the_desk_is_told() {
+  var parent = BrokenOrder();
+  Guid side = Guid.Empty;
+  runas (Ada) {
+    side = StartSideConversation(Conversation.Single(c => c.Id == parent), "Damaged parcel", "Can you check it?",
+                                 PartyOf("dee@example.test")).Id;
+    UnitOfWork.Commit();
+    DeliverAll();
+    SetSideDoneById(side, true);
+  }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single(x => x.To == "dee@example.test").SentId; }
+  runas (Inbox) {
+    var r = Mail("dee@example.test", "<dee-1@carrier.test>", "Checked — it was crushed in our depot. We will pay.", "Re: Damaged parcel", ours);
+    UnitOfWork.Commit();
+    Assert.False(r.Started);
+    Assert.Equal(side, r.Conversation!.Id);
+  }
+  runas (Ada) {
+    Assert.Equal(0, Message.Count(m => m.Conversation.Id == parent && m.Text.StartsWith("Checked")));
+    Assert.Contains("Dee answered in the side conversation “Damaged parcel”.", SaidOn(parent));
+    var line = SideConversationsOf(parent).Single();
+    Assert.True(line.TheirTurn);
+    Assert.False(line.Done);
+    Assert.Equal(2, line.Messages);
+    Assert.Equal("Checked — it was crushed in our depot. We will pay.", line.Last);
+  }
+}
+
+/// SECURITY-INVARIANT(a-web-side-answer-is-noted-by-the-desk-not-the-writer). Dee answers on the WEB, signed in: the answer
+/// lands in the side conversation, and Cus's conversation says so for the desk — written by the kit's run, not by Dee —
+/// the side conversation is open again and the app is told. Dee still reads nothing of Cus's conversation.
+[Test(Desk)]
+void an_answer_on_the_web_is_told_on_the_conversation_beside_by_the_desk_and_the_writer_still_sees_none_of_it() {
+  var parent = BrokenOrder();
+  Guid side = Guid.Empty;
+  runas (Ada) {
+    side = StartSideConversation(Conversation.Single(c => c.Id == parent), "Damaged parcel", "Can you check it?",
+                                 PartyOf("dee@example.test")).Id;
+    UnitOfWork.Commit();
+    DeliverAll();
+    SetSideDoneById(side, true);
+  }
+  runas (Dee) {
+    Assert.True(Conversation.Single(c => c.Id == side).IsSide);
+    ReplyAsCustomer(side, "Checked on our side — it left the depot intact.");
+  }
+  Background.Settle();
+  runas (Ada) {
+    Assert.Contains("Dee answered in the side conversation “Damaged parcel”.", SaidOn(parent));
+    var line = SideConversationsOf(parent).Single();
+    Assert.False(line.Done);
+    Assert.True(line.TheirTurn);
+    Assert.Equal(0, Message.Count(m => m.Conversation.Id == parent && m.Text.StartsWith("Checked")));
+    // The line was written by the kit's run, never by Dee.
+    Assert.Null(ConversationEvent.Single(e => e.Conversation.Id == parent && e.Kind == "conversations.side-replied").ByMember);
+  }
+  Assert.Equal(1, Heard.Count(h => h.Says == "answered beside: Damaged parcel"));
+  runas (Dee) {
+    Assert.Equal(0, Conversation.Count(c => c.Id == parent));
+    Assert.Equal(0, ConversationEntry.Count(e => e.Conversation.Id == parent));
+    Assert.Null(Conversation.Single(c => c.Id == side).SideOf);
+    Assert.Equal(0, SideAnswerNote.Count());
+  }
+}
+
+/// A thread inside the team: notes only, mailed to nobody, read by nobody outside the team.
+[Test(Desk)]
+void a_thread_inside_the_team_is_notes_that_go_nowhere() {
+  var parent = BrokenOrder();
+  Guid side = Guid.Empty;
+  runas (Ada) {
+    side = StartSideConversation(Conversation.Single(c => c.Id == parent), "Refund over the limit?", "Can we refund 400 EUR here?").Id;
+    UnitOfWork.Commit();
+    DeliverAll();
+    Assert.Equal(EntryVisibility.Internal, Message.Single(m => m.Conversation.Id == side).Visibility);
+    Assert.Equal(0, MessageDelivery.Count(d => d.Message.Conversation.Id == side));
+    Assert.Contains("A thread inside the team was started beside this: “Refund over the limit?”.", SaidOn(parent));
+    Assert.True(SideConversationsOf(parent).Single().InsideTheTeam);
+  }
+  runas (Cus) { Assert.Equal(0, ConversationEntry.Count(e => e.Conversation.Id == side)); }
+}
+
+/// What a side conversation is refused, with the sentence that says why.
+[Test(Desk)]
+void a_side_conversation_is_refused_with_a_sentence_that_says_why() {
+  var parent = BrokenOrder();
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Id == parent);
+    Assert.Equal("Cus is on this conversation already — write to them here.",
+                 Assert.Throws<ValidationException>(() => StartSideConversation(c, "About it", "Hi", PartyOf("cus@example.test"))).Message);
+    Assert.Equal("Give the side conversation a subject — the other side reads it as the mail's subject.",
+                 Assert.Throws<ValidationException>(() => StartSideConversation(c, " ", "Hi", PartyOf("dee@example.test"))).Message);
+    Assert.Equal("Eve has no address to mail — give one.",
+                 Assert.Throws<ValidationException>(() => StartSideConversation(c, "About it", "Hi",
+                   new ConversationsKitTests.Party { DisplayName = "Eve" })).Message);
+    var side = StartSideConversation(c, "Damaged parcel", "Can you check it?", PartyOf("dee@example.test"));
+    UnitOfWork.Commit();
+    Assert.Equal("Start a side conversation from the conversation itself, not from another side conversation.",
+                 Assert.Throws<ValidationException>(() => StartSideConversation(side, "Nested", "Hi")).Message);
+  }
+  // Nobody but the desk starts one.
+  runas (Cus) {
+    Assert.Denied(() => StartSideConversationTo(parent, "", "Mine", "Hello"));
+  }
+}
+
+/// Dee's address bounces: the side conversation says so, on its card and on the message — the desk must never believe
+/// "sent" that did not arrive.
+[Test(Desk)]
+void a_bounce_on_a_side_conversation_says_the_mail_did_not_arrive() {
+  var parent = BrokenOrder();
+  runas (Ada) {
+    StartSideConversation(Conversation.Single(c => c.Id == parent), "Damaged parcel", "Can you check it?", PartyOf("dee@example.test"));
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Inbox) {
+    DeliveryReport("email", Carried.Single(x => x.To == "dee@example.test").SentId, DeliveryOutcome.Failed,
+                   "The mail bounced: 550 no such user");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal("The mail bounced: 550 no such user", SideConversationsOf(parent).Single().Problem); }
+}
+
+/// ON SCREEN — the card on the conversation it is beside, closed and opened (its thread and its composer), wide and on
+/// a phone, light and dark; and the answer written in it goes to Dee.
+[Test(Desk)]
+void a_side_conversation_is_a_card_on_the_timeline_that_opens_into_its_thread() {
+  var parent = BrokenOrder();
+  runas (Ada) {
+    StartSideConversation(Conversation.Single(c => c.Id == parent), "Damaged parcel",
+                          "Can you check the parcel you delivered on Monday? The customer says the box was crushed.",
+                          PartyOf("dee@example.test"));
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single(x => x.To == "dee@example.test").SentId; }
+  runas (Inbox) {
+    Mail("dee@example.test", "<dee-1@carrier.test>", "Checked — it was crushed in our depot. We will pay for it.", "Re: Damaged parcel", ours);
+    UnitOfWork.Commit();
+  }
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Ada);
+  Ui.Visit("/desk/" + parent + "/thread");
+  Assert.Visible("Side conversation with Dee");
+  Assert.Visible("Dee answered");
+  Ui.Shot("side conversation closed wide");
+  Ui.Click("Open the side conversation");
+  Assert.Visible("Can you check the parcel you delivered on Monday?");
+  Ui.Fill("Write to Dee", "Thank you — please send the claim form.");
+  Ui.Click("Send", within: "Side conversation with Dee: Damaged parcel");
+  Assert.Visible("Thank you — please send the claim form.");
+  Ui.Shot("side conversation open wide");
+  Ui.Theme("dark");
+  Ui.Shot("side conversation open wide dark");
+  Ui.Theme("light");
+  Ui.Viewport(390, 844);
+  Assert.NoOverflow();
+  Ui.Shot("side conversation open phone");
+  DeliverAll();
+  runas (Ada) { Assert.Equal(1, Carried.Count(x => x.To == "dee@example.test" && x.Text == "Thank you — please send the claim form.")); }
+}

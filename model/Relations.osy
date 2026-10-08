@@ -1,0 +1,227 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+
+// ── who else is on it, and what belongs elsewhere ───────────────────────────────────────────────────────────────────
+//
+// Two things a desk does to a conversation besides writing in it:
+//   COPYING SOMEBODY IN — a customer's colleague, their manager — who is then sent every customer-visible reply on its
+//     channel and reads it where the customer does; and taking them off again. A mail that arrives with people on Cc
+//     seats them by itself (`ReceiveInbound`); these are the desk's own hands on the same seat.
+//   SPLITTING A MESSAGE OFF — a second question asked in the first one's thread — into a conversation of its own, with
+//     its writer as that conversation's customer. The message MOVES: its files, its renderings and the thread key it
+//     arrived under go with it, so a reply to that mail continues the new conversation; the old one keeps everything
+//     else. The new conversation says where it came from (`SplitFrom`), so a legal hold on the old one still keeps it
+//     (Osysharp.Privacy.Conversations).
+//
+// ⚑ THE MOVE IS THE KIT'S RUN'S. A timeline's history is fixed for every caller (`deny update Conversation` on an entry,
+//   staff included); a split is the one thing that may move an entry, so — like a merge of two parties — the desk RECORDS
+//   it (`ConversationSplit`, which its rules accept or refuse), and the kit's own run makes the move when that record is
+//   committed, as the system. The record is the audit. The app supplies the words (`ConversationCopy.EventSentence`) and
+//   what the new conversation IS to it (a ticket of its own, a link back), in the same commit as the record.
+
+/// Copy `party` in on `conversation`: from now on every customer-visible reply on its channel goes to them too, and they
+/// read it where the customer does. Somebody copied and taken off before is copied again. Refused for the person the
+/// conversation is with, and for somebody already on it. Its timeline says so (internal). Does not commit.
+public Participant CopyIn(Conversation conversation, Party party) {
+  var who = Survivor(party);
+  var seat = Participant.FirstOrDefault(p => p.Conversation == conversation && p.Party == who);
+  if (seat != null && seat.LeftAt == null) {
+    if (seat.Role == ParticipantRole.Customer) {
+      throw new ValidationException($"{NameOf(who)} is who this conversation is with — every reply goes to them already.");
+    }
+    throw new ValidationException($"{NameOf(who)} is already copied in.");
+  }
+  if (seat == null) {
+    seat = new Participant { Conversation = conversation, Party = who, Role = ParticipantRole.Cc, JoinedAt = DateTime.UtcNow };
+  } else {
+    seat.LeftAt = null;
+  }
+  Record(conversation, "conversations.copied", "Osysharp.Conversations", person: who.DisplayName, personParty: who);
+  return seat;
+}
+
+/// Take somebody copied off `seat`'s conversation: nothing more is sent to them, and they no longer read it. Only a
+/// copied seat — never the person the conversation is with. Its timeline says so. Does not commit.
+public void Uncopy(Participant seat) {
+  if (seat.Party == null || seat.Role != ParticipantRole.Cc) {
+    throw new ValidationException("Only somebody copied in can be taken off — not the person the conversation is with.");
+  }
+  var who = seat.Party!;
+  if (seat.LeftAt != null) { throw new ValidationException($"{NameOf(who)} is no longer copied in."); }
+  seat.LeftAt = DateTime.UtcNow;
+  Record(seat.Conversation, "conversations.uncopied", "Osysharp.Conversations", person: who.DisplayName, personParty: who);
+}
+
+/// Somebody copied on a conversation, as a desk lists them.
+public class CopiedPerson {
+  public Guid Seat;
+  public Guid Party;
+  public string Name = "";
+  /// Where replies reach them on mail — "" when they have no address.
+  public string Address = "";
+}
+
+/// The people copied on `conversationId` now, in the order they were copied — one read with their addresses.
+[SuppressWarning("cost-unbounded-read")]   // one conversation's copied people and their addresses
+public List<CopiedPerson> CopiedOn(Guid conversationId) {
+  List<CopiedPerson> people = [];
+  var seats = Participant.Where(p => p.Conversation.Id == conversationId && p.Role == ParticipantRole.Cc && p.LeftAt == null
+      && p.Party != null).Include(p => p.Party).OrderBy(p => p.JoinedAt).ToList();
+  var ids = seats.Select(s => s.Party!.Id).ToList();
+  var points = ContactPoint.Where(p => ids.Contains(p.Party.Id) && p.Kind == ContactPointKind.Email)
+    .OrderByDescending(p => p.IsPreferred).ToList();
+  foreach (var s in seats) {
+    var mail = points.FirstOrDefault(p => p.Party.Id == s.Party!.Id);
+    people.Add(new CopiedPerson { Seat = s.Id, Party = s.Party!.Id, Name = NameOf(s.Party!),
+                                  Address = mail == null ? "" : mail.Value });
+  }
+  return people;
+}
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum SplitState {
+  [Label("Split")] Split,
+  [Label("Refused")] Refused,
+}
+
+/// One message split off into a conversation of its own — what moved, from where, to where, and who did it.
+[Authority(Extensible)]
+public entity ConversationSplit {
+  /// The message that moves.
+  [Required] Message Message;
+  /// The conversation it was in, and the one it opens.
+  [Required] Conversation From;
+  [Required] Conversation Into;
+  [Required] DateTime At;
+  Principal? By;
+  /// Each timeline says what happened (false: the app writes lines of its own about it).
+  bool Record = true;
+  /// Why it was refused.
+  [MaxLength(500)] string? Problem;
+  SplitState State;                                      // no default — ConversationSplitting owns it
+
+  security {
+    // A split is the desk's: it moves what a customer wrote.
+    deny read when !IsConversationStaff;
+    deny create when !IsConversationStaff;
+    deny create where By != user;
+    deny update;
+    deny delete;
+  }
+}
+
+/// Makes a split's move once it is recorded — or refuses it, saying why. The kit's own run, so it alone moves an entry.
+public workflow ConversationSplitting {
+  Tracks    = ConversationSplit.State;
+  Autostart = true;
+  Initial   = Split;
+
+  state Split {
+    enter {
+      var s = this.Item;
+      var message = s.Message;
+      var from = s.From;
+      var into = s.Into;
+      // Checked again here, where it cannot be raced: what was recorded must still be a customer's message in `from`, and
+      // `into` a conversation with no message in it yet whose only customer-side seat is the message's writer — so a split
+      // can never put what one customer wrote where another customer reads it. (The app's own lines may already be on
+      // it: the new ticket says where it came from in the same commit.)
+      if (message.Conversation.Id != from.Id) {
+        s.Problem = "That message is no longer in the conversation it was split from.";
+        goto Refused;
+      }
+      if (message.Visibility != EntryVisibility.Customer || message.Direction != MessageDirection.Inbound || message.ByParty == null) {
+        s.Problem = "Only a message a customer wrote can be split off into a conversation of its own.";
+        goto Refused;
+      }
+      // SECURITY-INVARIANT(a-split-lands-only-where-its-writer-reads): a split moves a customer's words only into a
+      // conversation with no message in it whose only customer-side seat is their writer's — never into one another
+      // customer reads, whatever a record names. Guarded by tests/relations.test.osy
+      // (a_split_never_moves_a_message_where_another_customer_reads_it).
+      var writerId = Survivor(message.ByParty!).Id;
+      if (Message.Any(m => m.Conversation == into) || into.SplitFrom != null
+          || Participant.Any(p => p.Conversation == into && p.Party != null && p.Party.Id != writerId && p.LeftAt == null)) {
+        s.Problem = "A message is split off into a new conversation of its own writer's, with nothing written in it yet.";
+        goto Refused;
+      }
+      // The move. The platform gives a row that changes conversation the next place on its new one — it keeps no place
+      // of the old one's.
+      into.SplitFrom = from;
+      message.Conversation = into;
+      if (message.ExternalId != null && message.ExternalId != "") {
+        foreach (var k in ConversationThreadKey.Where(k => k.Conversation == from && k.ChannelKey == message.ChannelKey
+                                                           && k.Key == message.ExternalId).ToList()) {
+          k.Conversation = into;
+        }
+      }
+      // The old conversation's last word from its customer is what is left there.
+      var last = Message.Where(m => m.Conversation == from && m.Id != message.Id && m.Direction == MessageDirection.Inbound)
+        .OrderByDescending(m => m.At).FirstOrDefault();
+      from.LastCustomerEntryAt = last == null ? null : last.At;
+      if (s.Record) {
+        var writer = Survivor(message.ByParty!);
+        var left = Record(from, "conversations.split-out", "Osysharp.Conversations", person: writer.DisplayName, personParty: writer);
+        left.Detail = into.Subject ?? "";
+        var came = Record(into, "conversations.split-in", "Osysharp.Conversations", person: writer.DisplayName, personParty: writer);
+        came.Detail = from.Subject ?? "";
+      }
+    }
+  }
+
+  terminal cancel Refused { }
+}
+
+/// Split `message` off into a new conversation of its own — a second question asked in the first one's thread. Its
+/// writer is the new conversation's customer; the caller takes a staff seat. When the caller commits, the kit's run
+/// moves the message there — with its files, its renderings and the thread key it arrived under (a reply to that mail
+/// continues the new conversation) — and everything else stays. Commit the app's own side of it (a ticket, a link) in
+/// the same commit. `subject`: the new conversation's — the old one's when empty. `record`: each timeline says what
+/// happened (false when the app writes lines of its own). Refused for anything but what a customer wrote, and for the
+/// only thing they wrote. Answers the new conversation. Does not commit.
+public Conversation SplitOff(Message message, string subject = "", bool record = true) {
+  var from = message.Conversation;
+  if (message.Visibility != EntryVisibility.Customer || message.Direction != MessageDirection.Inbound || message.ByParty == null) {
+    throw new ValidationException("Only a message a customer wrote can be split off into a conversation of its own.");
+  }
+  var rest = Message.Count(m => m.Conversation == from && m.Id != message.Id && m.Direction == MessageDirection.Inbound
+                                && m.Visibility == EntryVisibility.Customer);
+  if (rest == 0) {
+    throw new ValidationException("That is the only thing the customer wrote here — there is nothing to split it from.");
+  }
+  var writer = Survivor(message.ByParty!);
+  var now = DateTime.UtcNow;
+  var what = subject.Trim() != "" ? subject.Trim() : (from.Subject ?? "");
+  var into = new Conversation {
+    Subject = what == "" ? null : what, StartedAt = now,
+    ReplyChannel = message.ChannelKey, ReplyEndpoint = message.Endpoint,
+    LastEntryAt = message.At, LastCustomerEntryAt = message.At,
+  };
+  new Participant { Conversation = into, Party = writer, Role = ParticipantRole.Customer, JoinedAt = now };
+  var me = Session.CurrentUser;
+  if (me != null) { new Participant { Conversation = into, Member = me, Role = ParticipantRole.Staff, JoinedAt = now }; }
+  new ConversationSplit { Message = message, From = from, Into = into, At = now, By = me, Record = record };
+  return into;
+}
+
+// ── the desk's hands on them: by id, and committed ─────────────────────────────────────────────────────────────────
+
+/// The desk copies somebody in by their address — the party already reached there, else a new one of the app's kind
+/// (`PartyKinds.Resolve`). Committed; refused with the sentence that says why.
+public void CopyInByAddress(Guid conversationId, string address, string name = "") {
+  var a = address.Trim().ToLower();
+  var at = a.IndexOf("@");
+  if (at < 1 || at == a.Length - 1 || a.Contains(" ")) {
+    throw new ValidationException("Give the address to copy in — like ana@example.com.");
+  }
+  CopyIn(Conversation.Single(c => c.Id == conversationId), PartyReachedBy(ContactPointKind.Email, a, name));
+  UnitOfWork.Commit();
+}
+
+/// The desk takes somebody copied off. Committed.
+public void UncopySeat(Guid seatId) {
+  var seat = Participant.FirstOrDefault(p => p.Id == seatId);
+  if (seat == null) { throw new ValidationException("They were already taken off."); }
+  Uncopy(seat);
+  UnitOfWork.Commit();
+}

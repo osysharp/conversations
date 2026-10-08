@@ -1,0 +1,259 @@
+namespace Osysharp.Conversations;
+
+// CODE IN A CONVERSATION (0.9.0) — the source file a bug is in, attached; a snippet pasted between ``` fences. Shown
+// with line numbers and coloured, never run and never rendered: an HTML or SVG file is shown as its SOURCE.
+//
+// ⚑ THE COLOURING IS A LEXER, NOT A PARSER — and deliberately so. It knows each language's comments, strings, numbers
+//   and keywords, which is what makes code READABLE at a glance; it does not know the grammar, so it can never refuse a
+//   file. A file in a language it does not know is shown plain, with its line numbers — still better than prose.
+//
+// ⚑ IT IS PURE OSY#. The timeline asks the server once per file (`PreviewOf`) and receives lines already split into
+//   tokens, so a page paints colours rather than running a lexer per render.
+
+/// What a run of code is, for colouring.
+public enum CodeTokenKind { Plain, Keyword, Type, String, Number, Comment }
+
+/// A run of code of one kind.
+public class CodeToken {
+  public string Text = "";
+  public CodeTokenKind Kind = CodeTokenKind.Plain;
+}
+
+/// One line of code, numbered from 1.
+public class CodeLine {
+  public int Number;
+  /// The whole line, as written — what a screen reader reads, rather than its coloured pieces one by one.
+  public string Text = "";
+  public List<CodeToken> Tokens = [];
+}
+
+/// `code`, split into lines of coloured tokens for `language` ("csharp", "typescript", "python", "sql", "html", …, or
+/// "" for none) — at most `maxLines` of them.
+public List<CodeLine> Highlight(string code, string language, int maxLines = 400) {
+  List<CodeLine> lines = [];
+  var lang = language.ToLower();
+  var keywords = KeywordsOf(lang);
+  var caseless = lang == "sql";
+  var line = "";
+  var hash = lang == "python" || lang == "shell" || lang == "yaml" || lang == "ruby";
+  var slashes = !hash && lang != "sql" && lang != "html" && lang != "xml" && lang != "css" && lang != "markdown" && lang != "";
+  var dashes = lang == "sql";
+  var markup = lang == "html" || lang == "xml";
+  // A block comment left open at the end of a line continues on the next — the marker that closes it, or "".
+  var open = "";
+  var rows = LinesOf(code);
+  var n = 0;
+  foreach (var raw in rows) {
+    n++;
+    if (n > maxLines) { break; }
+    var s = raw.Replace("\t", "    ");
+    var row = new CodeLine { Number = n, Text = s };
+    var i = 0;
+    var plain = "";
+    while (i < s.Length) {
+      // Inside a block comment carried over from an earlier line.
+      if (open != "") {
+        var end = s.IndexOf(open, i);
+        if (end < 0) { Push(row, plain, CodeTokenKind.Plain); plain = ""; Push(row, s.Substring(i), CodeTokenKind.Comment); i = s.Length; continue; }
+        Push(row, plain, CodeTokenKind.Plain); plain = "";
+        Push(row, s.Substring(i, end + open.Length - i), CodeTokenKind.Comment);
+        i = end + open.Length;
+        open = "";
+        continue;
+      }
+      var c = s[i];
+      var rest = s.Length - i;
+      // Comments.
+      if ((slashes && rest >= 2 && c == '/' && s[i + 1] == '/') || (hash && c == '#') || (dashes && rest >= 2 && c == '-' && s[i + 1] == '-')) {
+        Push(row, plain, CodeTokenKind.Plain); plain = "";
+        Push(row, s.Substring(i), CodeTokenKind.Comment);
+        i = s.Length;
+        continue;
+      }
+      var opener = (slashes || dashes || lang == "css") && rest >= 2 && c == '/' && s[i + 1] == '*' ? "*/"
+                 : markup && rest >= 4 && s.Substring(i, 4) == "<!--" ? "-->" : "";
+      if (opener != "") {
+        Push(row, plain, CodeTokenKind.Plain); plain = "";
+        open = opener;
+        var from = i;
+        var close = s.IndexOf(opener, i + 2);
+        if (close < 0) { Push(row, s.Substring(from), CodeTokenKind.Comment); i = s.Length; continue; }
+        Push(row, s.Substring(from, close + opener.Length - from), CodeTokenKind.Comment);
+        i = close + opener.Length;
+        open = "";
+        continue;
+      }
+      // A tag in markup: `<name` and `</name` are the keywords of HTML and XML.
+      if (markup && c == '<' && rest >= 2 && (char.IsLetter(s[i + 1]) || s[i + 1] == '/')) {
+        Push(row, plain, CodeTokenKind.Plain); plain = "";
+        var t = i + 1;
+        if (s[t] == '/') { t++; }
+        while (t < s.Length && (char.IsLetterOrDigit(s[t]) || s[t] == '-' || s[t] == ':')) { t++; }
+        Push(row, s.Substring(i, t - i), CodeTokenKind.Keyword);
+        i = t;
+        continue;
+      }
+      // Strings — to their closing quote on this line, a backslash escaping the next character.
+      if (c == '"' || c == '\'' || (c == '`' && !markup)) {
+        Push(row, plain, CodeTokenKind.Plain); plain = "";
+        var q = i + 1;
+        while (q < s.Length && s[q] != c) { if (s[q] == '\\') { q++; } q++; }
+        var stop = q < s.Length ? q + 1 : s.Length;
+        Push(row, s.Substring(i, stop - i), CodeTokenKind.String);
+        i = stop;
+        continue;
+      }
+      // Numbers.
+      if (char.IsDigit(c) && (i == 0 || !(char.IsLetterOrDigit(s[i - 1]) || s[i - 1] == '_'))) {
+        Push(row, plain, CodeTokenKind.Plain); plain = "";
+        var d = i;
+        while (d < s.Length && (char.IsLetterOrDigit(s[d]) || s[d] == '.' || s[d] == '_')) { d++; }
+        Push(row, s.Substring(i, d - i), CodeTokenKind.Number);
+        i = d;
+        continue;
+      }
+      // Words — a keyword of the language, a type (a capitalised name, in a language that capitalises them), or plain.
+      if (char.IsLetter(c) || c == '_' || c == '@' || c == '$') {
+        var w = i + 1;
+        while (w < s.Length && (char.IsLetterOrDigit(s[w]) || s[w] == '_')) { w++; }
+        var word = s.Substring(i, w - i);
+        var key = caseless ? word.ToLower() : word;
+        if (keywords.Contains(key)) {
+          Push(row, plain, CodeTokenKind.Plain); plain = "";
+          Push(row, word, CodeTokenKind.Keyword);
+        } else if (slashes && char.IsUpper(c) && lang != "json") {
+          Push(row, plain, CodeTokenKind.Plain); plain = "";
+          Push(row, word, CodeTokenKind.Type);
+        } else {
+          plain = plain + word;
+        }
+        i = w;
+        continue;
+      }
+      plain = plain + c.ToString();
+      i++;
+    }
+    Push(row, plain, CodeTokenKind.Plain);
+    lines.Add(row);
+  }
+  return lines;
+}
+
+/// A text's lines — a final newline ends the last line rather than starting an empty one, as an editor counts them.
+public List<string> LinesOf(string text) {
+  var body = text.Replace("\r\n", "\n");
+  if (body.EndsWith("\n")) { body = body.Substring(0, body.Length - 1); }
+  return body.Split("\n").ToList();
+}
+
+void Push(CodeLine row, string text, CodeTokenKind kind) {
+  if (text == "") { return; }
+  row.Tokens.Add(new CodeToken { Text = text, Kind = kind });
+}
+
+/// The keywords coloured for `language` — "" and an unknown language have none.
+HashSet<string> KeywordsOf(string language) {
+  if (language == "csharp" || language == "osysharp") {
+    return new HashSet<string> { "abstract", "as", "async", "await", "base", "bool", "break", "byte", "case", "catch",
+      "char", "class", "const", "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event",
+      "false", "finally", "float", "for", "foreach", "get", "if", "in", "int", "interface", "internal", "is", "long",
+      "namespace", "new", "null", "object", "out", "override", "params", "private", "protected", "public", "readonly",
+      "record", "ref", "return", "sealed", "set", "static", "string", "struct", "switch", "this", "throw", "true", "try",
+      "typeof", "using", "var", "virtual", "void", "while", "entity", "component", "render", "action", "live", "policy",
+      "security", "allow", "deny", "when", "where", "use", "workflow", "state", "on" };
+  }
+  if (language == "typescript" || language == "javascript") {
+    return new HashSet<string> { "async", "await", "break", "case", "catch", "class", "const", "continue", "default",
+      "delete", "do", "else", "export", "extends", "false", "finally", "for", "from", "function", "if", "import", "in",
+      "instanceof", "interface", "let", "new", "null", "of", "return", "static", "super", "switch", "this", "throw",
+      "true", "try", "type", "typeof", "undefined", "var", "void", "while", "yield", "string", "number", "boolean" };
+  }
+  if (language == "python") {
+    return new HashSet<string> { "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
+      "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
+      "None", "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while", "with", "yield", "self" };
+  }
+  if (language == "sql") {
+    return new HashSet<string> { "select", "from", "where", "and", "or", "not", "insert", "into", "values", "update",
+      "set", "delete", "create", "table", "index", "join", "left", "right", "inner", "outer", "on", "group", "by", "order",
+      "having", "limit", "as", "null", "is", "in", "like", "distinct", "union", "all", "case", "when", "then", "else",
+      "end", "asc", "desc", "primary", "key", "references", "alter", "drop", "with" };
+  }
+  if (language == "shell") {
+    return new HashSet<string> { "if", "then", "else", "elif", "fi", "for", "do", "done", "while", "case", "esac",
+      "function", "return", "export", "local", "echo", "in", "set", "unset", "exit" };
+  }
+  if (language == "json" || language == "yaml") { return new HashSet<string> { "true", "false", "null" }; }
+  if (language == "html" || language == "xml" || language == "css" || language == "markdown" || language == "") {
+    return new HashSet<string>();
+  }
+  // Java, Kotlin, Go, Rust, Swift, C, C++, PHP, Ruby — the words they share.
+  return new HashSet<string> { "fn", "func", "fun", "let", "mut", "impl", "struct", "enum", "match", "pub", "use", "mod",
+    "trait", "def", "end", "package", "import", "return", "if", "else", "for", "while", "switch", "case", "break",
+    "continue", "class", "public", "private", "protected", "static", "void", "int", "long", "float", "double", "char",
+    "bool", "boolean", "true", "false", "null", "nil", "var", "val", "const", "new", "this", "self", "go", "defer",
+    "interface", "extends", "implements", "throws", "throw", "try", "catch", "finally", "include", "namespace",
+    "template", "typename", "auto", "unsigned", "elsif", "unless", "do", "module", "require", "echo", "function" };
+}
+
+/// A message's text as it is shown: prose, and the code a writer fenced between ``` lines (with the language they
+/// named after the opening fence, if any). An unclosed fence runs to the end — a half-pasted snippet is still code.
+public List<BodySegment> SegmentsOf(string text) {
+  List<BodySegment> segments = [];
+  var prose = "";
+  var code = "";
+  var language = "";
+  var inCode = false;
+  foreach (var line in text.Replace("\r\n", "\n").Split("\n")) {
+    if (line.Trim().StartsWith("```")) {
+      if (!inCode) {
+        if (prose.Trim() != "") { segments.Add(new BodySegment { Text = prose.TrimEnd() }); }
+        prose = "";
+        language = LanguageNamed(line.Trim().Substring(3).Trim().ToLower());
+        inCode = true;
+      } else {
+        segments.Add(new BodySegment { Code = true, Language = language, Text = code.TrimEnd() });
+        code = "";
+        inCode = false;
+      }
+      continue;
+    }
+    if (inCode) { code = code + line + "\n"; } else { prose = prose + line + "\n"; }
+  }
+  if (inCode) { segments.Add(new BodySegment { Code = true, Language = language, Text = code.TrimEnd() }); }
+  else if (prose.Trim() != "" || segments.Count == 0) { segments.Add(new BodySegment { Text = prose.TrimEnd() }); }
+  return segments;
+}
+
+/// A piece of a message's text — prose, or code (with its lines coloured, once `BodyOf` has read it).
+public class BodySegment {
+  public bool Code;
+  public string Language = "";
+  public string Text = "";
+  public List<CodeLine> Lines = [];
+}
+
+/// The language a fence names (```cs, ```ts, ```python) as the lexer knows it — an extension or a name — or "".
+string LanguageNamed(string named) {
+  if (named == "") { return ""; }
+  var byExtension = LanguageOfExtension(named);
+  if (byExtension != "") { return byExtension; }
+  if (named == "c#" || named == "csharp") { return "csharp"; }
+  if (named == "typescript" || named == "javascript" || named == "python" || named == "sql" || named == "shell"
+      || named == "json" || named == "yaml" || named == "xml" || named == "html" || named == "css" || named == "markdown"
+      || named == "java" || named == "kotlin" || named == "go" || named == "rust" || named == "ruby" || named == "php"
+      || named == "swift" || named == "osysharp") { return named; }
+  if (named == "bash" || named == "sh" || named == "zsh" || named == "console") { return "shell"; }
+  return "";
+}
+
+/// A message's text as the timeline shows it: prose, and each fenced snippet with its lines coloured. Asked once per
+/// message that has a fence in it; a message without one is shown as it is.
+[AllowAnonymous]
+public List<BodySegment> BodyOf(string text) {
+  var segments = SegmentsOf(text);
+  foreach (var segment in segments) {
+    if (segment.Code) { segment.Lines = Highlight(segment.Text, segment.Language, 400); }
+  }
+  return segments;
+}

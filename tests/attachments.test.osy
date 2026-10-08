@@ -1,0 +1,125 @@
+// Osysharp.Conversations 0.8.0 — FILES ON MESSAGES. A file is readable exactly where its message is (the platform's
+// `[Attachment]`), so every test reads the FILE ITSELF as the person it is or is not for — not merely the row that points
+// at it. What a file is comes from its bytes, and the limits are sentences.
+//
+// The desk (Ada), Cus and Dee (customers with portal accounts) and `PartyOf` are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using Osysharp.Storage;
+using ConversationsKitTests;
+
+/// The first bytes of a PNG — what makes a file a picture to the kit, whatever it is called.
+byte[] Png() { return [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]; }
+
+/// A conversation with Cus, and its id.
+Conversation WithCus(string subject) {
+  var c = OpenConversation(PartyOf("cus@example.test"), subject);
+  UnitOfWork.Commit();
+  return c;
+}
+
+[Test(Desk)]
+void a_customer_reads_the_screenshot_on_a_reply_and_never_the_one_on_a_note() {
+  Guid replyShot = Guid.Empty;
+  Guid noteShot = Guid.Empty;
+  runas (Ada) {
+    var c = WithCus("Screens");
+    var shot = File.Create("annotated.png", "image/png", Png());
+    var internalShot = File.Create("triage.png", "image/png", Png());
+    Post(c, "Here is where to click.", EntryVisibility.Customer, files: [shot]);
+    Post(c, "Her account is flagged — see screenshot.", EntryVisibility.Internal, files: [internalShot]);
+    UnitOfWork.Commit();
+    replyShot = shot.Id;
+    noteShot = internalShot.Id;
+  }
+  runas (Cus) {
+    // The ALLOW first: the reply's picture, as a row and as the file itself.
+    var attached = MessageAttachment.Single(a => a.Message.Conversation.Subject == "Screens");
+    Assert.Equal("annotated.png", attached.FileName);
+    Assert.Equal(AttachmentKind.Image, attached.Kind);
+    Assert.Equal("image/png", attached.ContentType);
+    Assert.True(FileAsset.Any(f => f.Id == replyShot));
+    // The note's picture: neither the row nor the file.
+    Assert.False(FileAsset.Any(f => f.Id == noteShot));
+  }
+  // Another customer reads neither.
+  runas (Dee) {
+    Assert.False(FileAsset.Any(f => f.Id == replyShot));
+    Assert.Equal(0, MessageAttachment.Count(a => a.Message.Conversation.Subject == "Screens"));
+  }
+}
+
+[Test(Desk)]
+void a_customer_attaches_their_screenshot_and_the_source_file_the_bug_is_in() {
+  runas (Ada) { WithCus("Crash"); }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Crash");
+    var shot = File.Create("broken.png", "image/png", Png());
+    var code = File.Create("Export.cs", "text/plain", Encoding.UTF8.GetBytes("class Export {\n  void Run() { throw null; }\n}\n"));
+    Reply(c, "It crashes here — screenshot and the file attached.", [shot, code]);
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    var files = MessageAttachment.Where(a => a.Message.Conversation.Subject == "Crash").OrderBy(a => a.FileName).ToList();
+    Assert.Equal(2, files.Count);
+    Assert.Equal("Export.cs", files[0].FileName);
+    Assert.Equal(AttachmentKind.Code, files[0].Kind);
+    Assert.Equal("csharp", files[0].Language);
+    Assert.Equal("text/x-csharp", files[0].ContentType);
+    Assert.Equal(AttachmentKind.Image, files[1].Kind);
+    Assert.True(files[1].Inline);
+  }
+}
+
+[Test(Desk)]
+void a_screenshot_alone_is_a_message() {
+  runas (Ada) { WithCus("Just a picture"); }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Just a picture");
+    Reply(c, "", [File.Create("only.png", "image/png", Png())]);
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal(1, MessageAttachment.Count(a => a.Message.Conversation.Subject == "Just a picture")); }
+}
+
+[Test(Desk)]
+void a_name_that_claims_a_picture_the_bytes_are_not_is_refused_with_a_sentence() {
+  runas (Ada) { WithCus("Liar"); }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Liar");
+    var fake = File.Create("screenshot.png", "image/png", Encoding.UTF8.GetBytes("<html><script>alert(1)</script></html>"));
+    var refused = Assert.Throws<ValidationException>(() => Reply(c, "Look", [fake]));
+    Assert.Contains("screenshot.png is named as a picture", refused.Message);
+  }
+}
+
+[Test(Desk)]
+void a_file_over_the_limit_is_refused_naming_the_file_its_size_and_the_limit() {
+  runas (Ada) { WithCus("Big"); }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Big");
+    var log = File.Create("server.log", "text/plain", Encoding.UTF8.GetBytes("".PadRight(250000, 'A')));
+    var refused = Assert.Throws<ValidationException>(() => Reply(c, "The log", [log]));
+    Assert.Contains("server.log is 245 KB, and a file may be at most 196 KB", refused.Message);
+  }
+}
+
+[Test(Desk)]
+void a_customer_cannot_re_attach_a_file_she_may_only_read() {
+  runas (Ada) {
+    var c = WithCus("Borrowed");
+    Post(c, "See the attached guide.", EntryVisibility.Customer, files: [File.Create("guide.png", "image/png", Png())]);
+    UnitOfWork.Commit();
+  }
+  runas (Cus) {
+    var c = Conversation.Single(x => x.Subject == "Borrowed");
+    // She READS the desk's picture (through the reply it is on) — reading is not leave to share it further.
+    var theirs = FileAsset.Single(f => f.Name == "guide.png");
+    Assert.Denied(() => {
+      Reply(c, "Same picture again", [theirs]);
+      UnitOfWork.Commit();
+    });
+  }
+}
+

@@ -1,0 +1,410 @@
+namespace Osysharp.Conversations;
+
+using Osysharp.Identity;
+
+// ── language and redaction ─────────────────────────────────────────────────────────────────────────────────────────
+//
+// Every message keeps its ORIGINAL — what was written or received, after at-rest scrubbing only — and gains a
+// CANONICAL copy in the desk's language (`CanonicalLanguage`, English by default), redacted, which is what search,
+// memory and analysis read. A reply the desk writes reaches each customer IN THEIR LANGUAGE, as a rendering
+// (`MessageText`) marked as the text they were sent. Translation and detection are the app's own provider — bring your
+// own key (`IConversationTranslator`); with none, nothing is translated and the original stands as the canonical copy.
+//
+// ⚑ SCRUBBED AT REST, BEFORE ANYTHING. A card number typed into the chat is never stored — storing a full PAN is a PCI
+//   DSS breach on its own, whatever happens next — so the original is scrubbed (`[card ••••1234]`) as it is written,
+//   on every channel, in both directions. What goes to a translator or into the canonical copy is redacted further
+//   (addresses, numbers, account numbers); the original keeps those, because the tenant keeps its own records.
+
+/// A translation provider — the app's, with the app's key. An adapter over the app's model client is a few lines.
+public interface IConversationTranslator {
+  /// Stable — recorded as the `Engine` of every rendering it made.
+  string Key { get; }
+  /// Its key and model are set. A translator that is not ready is as good as none: nothing is translated.
+  bool IsReady();
+  /// The language `text` is written in, as a BCP-47 tag ("sv", "en", "pt-BR").
+  string Detect(string text);
+  /// `text` from `from` into `to`, keeping every glossary term as written (product and brand names).
+  string Translate(string text, string from, string to, List<GlossaryTerm> glossary);
+
+  // ── added with defaults: a translator that omits them keeps compiling ──
+  /// Why it is not ready, in a sentence the desk can act on — shown on each message it left untranslated.
+  string NotReadyReason() => TranslatorNotReady();
+  /// The language `text` is written in when it can be told WITHOUT asking anybody — offline, in the writer's own commit
+  /// — or "" when it cannot be told that way for sure. What it answers is known before anything routes the message.
+  string DetectLocally(string text) => "";
+}
+
+/// What a translator that is not ready says by default, in the reader's language.
+public string TranslatorNotReady() { return Translate("The translator is not ready — its settings are not complete."); }
+
+/// A term a translation keeps as it is — a product name, a brand.
+public class GlossaryTerm {
+  public string Term = "";
+  /// What to write in its place in the other language, or "" to keep `Term` itself.
+  public string Rendering = "";
+}
+
+/// What is taken out of a text before it is stored, and before it reaches a model. Override a method to change what;
+/// the Privacy kit's redactor replaces it whole.
+public class ConversationRedactor {
+  /// At rest — on every message, as it is written: card numbers (Luhn-checked), a security code beside one, and the
+  /// obvious secrets (API keys, a typed password). The original keeps everything else.
+  public virtual string ScrubAtRest(string text) {
+    var scrubbed = text;
+    foreach (var m in Regex.Matches(text, "(?<![\\d])(?:\\d[ -]?){12,18}\\d(?![\\d])")) {
+      var digits = Regex.Replace(m.Value, "[^0-9]", "");
+      if (digits.Length >= 13 && digits.Length <= 19 && PassesLuhn(digits)) {
+        scrubbed = scrubbed.Replace(m.Value, "[card ••••" + digits.Substring(digits.Length - 4) + "]");
+      }
+    }
+    scrubbed = Regex.Replace(scrubbed, "(?i)\\b(cvv2?|cvc2?|cid|security code)(\\s*[:#]?\\s*)\\d{3,4}\\b", "$1$2[•••]");
+    scrubbed = Regex.Replace(scrubbed, "(?i)\\b(password|passwd|pwd|passcode|pin)(\\s*(?:is|:|=)\\s*)\\S+", "$1$2[secret]");
+    scrubbed = Regex.Replace(scrubbed, "\\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\\b", "[secret]");
+    scrubbed = Regex.Replace(scrubbed, "\\bAKIA[0-9A-Z]{16}\\b", "[secret]");
+    scrubbed = Regex.Replace(scrubbed, "\\bgh[pousr]_[A-Za-z0-9]{20,}\\b", "[secret]");
+    return scrubbed;
+  }
+  /// Before a model or the canonical copy — everything `ScrubAtRest` takes, and the personal details a translator and
+  /// a search index have no business holding: addresses, phone numbers, account numbers.
+  public virtual string ForAModel(string text) {
+    var redacted = ScrubAtRest(text);
+    redacted = Regex.Replace(redacted, "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "[email]");
+    redacted = Regex.Replace(redacted, "\\b[A-Z]{2}\\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?\\b", "[account number]");
+    redacted = Regex.Replace(redacted, "(?<![\\w])\\+?\\d[\\d ()-]{7,}\\d(?![\\w])", "[phone]");
+    return redacted;
+  }
+}
+
+/// Does a card number pass the Luhn check — the test that tells a card number from any other run of digits?
+public bool PassesLuhn(string digits) {
+  var sum = 0;
+  var doubleIt = false;
+  for (var i = digits.Length - 1; i >= 0; i--) {
+    var d = Convert.ToInt32(digits.Substring(i, 1));
+    if (doubleIt) { d = d * 2; if (d > 9) { d = d - 9; } }
+    sum = sum + d;
+    doubleIt = !doubleIt;
+  }
+  return sum % 10 == 0;
+}
+
+/// The app's translator, when it has one that is ready — else null.
+public IConversationTranslator? ReadyTranslator() {
+  var t = App.Setting<ConversationsSetup>().Translator;
+  return t != null && t.IsReady() ? t : null;
+}
+
+/// "sv-SE" and "sv" are one language.
+bool SameLanguage(string? a, string? b) {
+  if (a == null || b == null) { return false; }
+  var x = a.Trim().ToLower();
+  var y = b.Trim().ToLower();
+  var xi = x.IndexOf("-");
+  var yi = y.IndexOf("-");
+  return (xi < 0 ? x : x.Substring(0, xi)) == (yi < 0 ? y : y.Substring(0, yi));
+}
+
+/// A message just written — in the writer's commit, with no call to anybody: its canonical copy is the redacted
+/// original (what search reads until a translation replaces it), and, when the app has a translator, its language work
+/// is queued (`MessageLanguageWork`) to run after the commit, on a clock due at once. A slow translator, or one that is
+/// down, never slows a message being written or stops it.
+///
+/// ⭐ AND ITS LANGUAGE, WHEN THAT IS SURE WITHOUT ASKING ANYBODY (`DetectLocally` — the offline detector). A customer's
+///   message then carries its language IN THIS COMMIT (`CustomerLanguageOf`), so whatever the app does with it next — a
+///   desk opening the ticket and routing it by language — sees it. Only a sure answer: when the detector cannot tell, the
+///   language work after the commit asks the model, as before. The PARTY's language is still learnt there, by the app —
+///   the writer (a signed-out visitor, say) may not change the party row.
+///
+/// ⚑ NO WORK WHILE THE TRANSLATOR IS NOT READY (SP-73). Work queued for a translator that cannot run did nothing but end
+///   itself as "not translated" — a run per message, 9 statements each. Such a message has no work; the desk is told it
+///   was not translated all the same (`ShownFor`, `LanguageStatusOf`), and `TranslateConversationAgain` queues it once
+///   the translator is back.
+void ApplyLanguage(Message message) {
+  var setup = App.Setting<ConversationsSetup>();
+  message.CanonicalText = setup.Redactor.ForAModel(message.Text);
+  message.CanonicalSource = TextSource.Original;
+  if (setup.Translator == null) { return; }
+  if (setup.Translator!.IsReady()) { new MessageLanguageWork { Message = message }; }
+  if (message.Direction != MessageDirection.Inbound) { return; }
+  var sure = setup.Translator!.DetectLocally(message.CanonicalText!);
+  if (sure != "") { message.Language = sure; }
+}
+
+/// The language `conversation`'s customer writes in, as far as it is known NOW — their own language once it is learnt,
+/// else the newest customer message's (known in the commit that brought it, when the offline detector was sure) — or
+/// null. What a desk routes a new ticket by.
+public string? CustomerLanguageOf(Conversation conversation) {
+  string? newest = null;
+  var at = DateTime.MinValue;
+  foreach (var e in conversation.Entries) {
+    var m = e as Message;
+    if (m == null || m.Direction != MessageDirection.Inbound || m.Language == null) { continue; }
+    if (m.ByParty != null && m.ByParty!.Language != null) { return m.ByParty!.Language; }
+    if (newest == null || m.At > at) { newest = m.Language; at = m.At; }
+  }
+  return newest;
+}
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+/// Where one message's language work has got to — driven by `MessageLanguage`, nobody else.
+public enum LanguageWorkState {
+  [Label("Waiting")] Queued,
+  [Label("Done")] Done,
+  [Label("Trying again")] Retrying,
+  [Label("Not translated")] Unavailable,
+}
+
+/// The language work one message waits for: its language, its copy in the desk's language, and — a customer-visible
+/// reply — a rendering in each customer's language. Done AFTER the commit that wrote the message, by `MessageLanguage`,
+/// exactly as a delivery is sent after it. Made only while the app has a translator; nothing else is translated.
+///
+/// ⚑ One per message (`[Unique]`), so nobody — a customer writing straight to the table included — makes a message cost
+///   more than one round of translation.
+[Unique(Message)]
+[Authority(Extensible)]
+public entity MessageLanguageWork {
+  [Required] Message Message;
+  LanguageWorkState State;                              // no default — MessageLanguage owns it
+  int Attempts;
+  /// Why it is not translated, in a sentence the desk can act on ("the model key is missing…").
+  [MaxLength(500)] string? Problem;
+  DateTime? DoneAt;
+
+  security {
+    // The writer's own post makes it — a customer's in their own conversation; the app grants its staff.
+    allow create when IsConversationCustomer where IsCustomerIn(Message.Conversation.Id);
+    // The work is the desk's to read: a customer reads their conversation, never its plumbing.
+    deny read when !IsConversationStaff;
+    deny update Message;
+  }
+}
+
+/// Does each message's language work after the commit that wrote it — detection, the canonical copy, the renderings —
+/// on a clock due at once, as `ConversationDelivery` sends. A translator that fails is tried twice more, two minutes
+/// apart; one that is not ready (its key is missing) is not tried at all. Either way the message keeps its original as
+/// its copy, the desk is told why, and a delivery waiting for a rendering goes out in the original rather than never.
+public workflow MessageLanguage {
+  Tracks    = MessageLanguageWork.State;
+  Autostart = true;
+  Initial   = Queued;
+
+  event TryAgain();
+
+  state Queued {
+    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    on Expire {
+      var work = this.Item;
+      work.Attempts = work.Attempts + 1;
+      var t = App.Setting<ConversationsSetup>().Translator;
+      if (t == null || !t!.IsReady()) {
+        work.Problem = t == null ? "No translator is set up." : t!.NotReadyReason();
+        goto Unavailable;
+      }
+      try {
+        DoLanguageWork(work.Message, t!);
+      } catch (Exception e) {
+        work.Problem = "The translator failed: " + e.Message;
+        if (work.Attempts < 3) { goto Retrying; }
+        goto Unavailable;
+      }
+      work.Problem = null;
+      work.DoneAt = DateTime.UtcNow;
+      goto Done;
+    }
+  }
+
+  state Retrying {
+    Expire { Within = TimeSpan.FromMinutes(2); Accrues = false; }
+    on Expire { goto Queued; }
+  }
+
+  /// Not translated — the desk reads the original and why. Once the translator is back, `TranslateAgain` tries again.
+  state Unavailable {
+    // Entered once the work is no longer pending, so a waiting delivery that looks again sees it ended.
+    enter { LanguageWorkEnded(this.Item.Message); }
+    on TryAgain { this.Item.Attempts = 0; goto Queued; }
+  }
+
+  terminal success Done {
+    enter { LanguageWorkEnded(this.Item.Message); }
+  }
+}
+
+/// The language work for `message`, done now: its language, its canonical copy, the customer's language (the first
+/// time it is known), and — a customer-visible reply — each customer's rendering.
+void DoLanguageWork(Message message, IConversationTranslator t) {
+  // Erased while it waited: nothing of theirs is sent anywhere.
+  if (message.CanonicalText == null || message.Text == Erased()) { return; }
+  var setup = App.Setting<ConversationsSetup>();
+  var redacted = message.CanonicalText!;
+  var language = t.Detect(redacted);
+  message.Language = language == "" ? null : language;
+  if (message.Language != null && !SameLanguage(language, setup.CanonicalLanguage)) {
+    message.CanonicalText = t.Translate(redacted, language, setup.CanonicalLanguage, setup.Glossary);
+    message.CanonicalSource = TextSource.Machine;
+  }
+  // The language a customer writes in is the one replies reach them in — set the first time it is known.
+  if (message.Direction == MessageDirection.Inbound && message.ByParty != null && message.Language != null) {
+    var party = message.ByParty!;
+    if (party.Language == null) {
+      party.Language = message.Language;
+      setup.Events.LanguageKnown(message.Conversation, party, message.Language!);
+    }
+  }
+  if (message.Visibility == EntryVisibility.Customer && message.Direction == MessageDirection.Outbound) {
+    RenderForCustomers(message, t);
+  }
+}
+
+/// A customer-visible reply: a rendering in every customer's language that is not the reply's own, marked as the text
+/// they were SENT.
+[SuppressWarning("cost-unbounded-read")]   // one conversation's seats
+void RenderForCustomers(Message message, IConversationTranslator t) {
+  var setup = App.Setting<ConversationsSetup>();
+  List<string> done = [];
+  foreach (var seat in Participant.Where(p => p.Conversation == message.Conversation && p.LeftAt == null && p.Party != null
+      && (p.Role == ParticipantRole.Customer || p.Role == ParticipantRole.Cc)).ToList()) {
+    var language = seat.Party!.Language;
+    if (language == null || SameLanguage(language, message.Language ?? setup.CanonicalLanguage)) { continue; }
+    if (done.Any(d => SameLanguage(d, language))) { continue; }
+    if (MessageText.Any(r => r.Message == message && r.WasDelivered && r.Language == language)) { continue; }
+    done.Add(language!);
+    message.Rendered = true;
+    new MessageText { Message = message, Language = language!, Source = TextSource.Machine, Engine = t.Key, WasDelivered = true,
+                      Text = t.Translate(message.Text, message.Language ?? setup.CanonicalLanguage, language!, setup.Glossary) };
+  }
+}
+
+/// Every delivery of `message` that waited for its renderings goes out now — translated or, when that failed, in the
+/// original: an answer in the desk's language beats none.
+[SuppressWarning("cost-unbounded-read")]   // one message's deliveries
+void LanguageWorkEnded(Message message) {
+  foreach (var d in MessageDelivery.Where(d => d.Message == message && d.State == DeliveryState.AwaitingLanguage).ToList()) {
+    ConversationDelivery.RaiseLanguageReady(d);
+  }
+}
+
+/// Is `message` still waiting for its language work — queued, or being tried again, for less than a quarter of an hour?
+/// A delivery waits that long for its rendering, and no longer.
+public bool LanguagePending(Message message) {
+  var since = DateTime.UtcNow.AddMinutes(-15);
+  return MessageLanguageWork.Any(w => w.Message == message && w.CreatedAt > since
+    && (w.State == LanguageWorkState.Queued || w.State == LanguageWorkState.Retrying));
+}
+
+/// Whether the desk can read a conversation in its own language right now.
+public class LanguageStatus {
+  /// The app has a translator and it is not ready — `Reason` says why, in words the desk can act on.
+  public bool Off;
+  public string Reason = "";
+  /// Messages on this conversation that were not translated (the translator failed, or was off when they came).
+  public int Untranslated;
+}
+
+/// The desk's view of translation on `conversationId`: off (and why), and how many of its messages were not translated —
+/// their work ended untranslated, or they came while the translator was not ready and so have none. One read; nothing
+/// at all for an app that translates nothing.
+public LanguageStatus LanguageStatusOf(Guid conversationId) {
+  var status = new LanguageStatus();
+  var t = App.Setting<ConversationsSetup>().Translator;
+  if (t == null) { return status; }
+  if (!t!.IsReady()) { status.Off = true; status.Reason = t!.NotReadyReason(); }
+  status.Untranslated = Message.Count(m => m.Conversation.Id == conversationId
+    && !MessageLanguageWork.Any(w => w.Message == m && w.State != LanguageWorkState.Unavailable));
+  return status;
+}
+
+/// Try every untranslated message on `conversationId` again — once the translator is back: the work that ended
+/// untranslated, and the messages that came while it was not ready. Answers how many.
+[SuppressWarning("cost-unbounded-read")]   // one conversation's untranslated messages, and trying again must reach every one
+public int TranslateConversationAgain(Guid conversationId) {
+  var t = App.Setting<ConversationsSetup>().Translator;
+  if (t == null) { throw new ValidationException("No translator is set up."); }
+  if (!t!.IsReady()) { throw new ValidationException(t!.NotReadyReason()); }
+  var waiting = MessageLanguageWork.Where(w => w.Message.Conversation.Id == conversationId
+    && w.State == LanguageWorkState.Unavailable).ToList();
+  foreach (var w in waiting) { MessageLanguage.RaiseTryAgain(w); }
+  var unqueued = Message.Where(m => m.Conversation.Id == conversationId && !MessageLanguageWork.Any(w => w.Message == m)).ToList();
+  foreach (var m in unqueued) { new MessageLanguageWork { Message = m }; }
+  return waiting.Count + unqueued.Count;
+}
+
+/// Try a message's translation again — once the translator is back. Staff only (the work is theirs to read).
+public void TranslateAgain(Guid messageId) {
+  var work = MessageLanguageWork.FirstOrDefault(w => w.Message.Id == messageId);
+  if (work == null) {
+    var message = Message.Single(m => m.Id == messageId);
+    if (App.Setting<ConversationsSetup>().Translator == null) { throw new ValidationException("No translator is set up."); }
+    new MessageLanguageWork { Message = message };
+    return;
+  }
+  if (work.State == LanguageWorkState.Unavailable) { MessageLanguage.RaiseTryAgain(work); }
+}
+
+/// The text a customer of `language` was sent for `message` — their rendering, else the original.
+[SuppressWarning("cost-unbounded-read")]   // one message's renderings — one per language
+public string TextSentIn(Message message, string? language) {
+  if (language != null) {
+    foreach (var r in MessageText.Where(r => r.Message == message && r.WasDelivered).ToList()) {
+      if (SameLanguage(r.Language, language)) { return r.Text; }
+    }
+  }
+  return message.Text;
+}
+
+/// What a page shows for one message: the text the reader should read, and a sentence about what it is (a translation,
+/// and from what) — for a customer, the rendering they were sent; for the desk, the canonical copy of a message in
+/// another language, with the original a click away.
+public class ShownText {
+  public string Text = "";
+  public string Original = "";
+  /// "Translated from Swedish", "Sent in Swedish" — "" when there is nothing to say.
+  public string Note = "";
+  /// The desk: its translation is still being made.
+  public bool Pending;
+  /// The desk: it was not translated, and `TranslateAgain` may try once the translator is back.
+  public bool CanRetry;
+}
+
+/// What `reader` (the desk, or the customer) is shown for the message `messageId`.
+[AllowAnonymous]
+[SuppressWarning("cost-unbounded-read")]   // one message's renderings — one per language
+public ShownText ShownFor(Guid messageId, bool desk) {
+  var message = Message.Single(m => m.Id == messageId);
+  var setup = App.Setting<ConversationsSetup>();
+  var shown = new ShownText { Text = message.Text, Original = message.Text };
+  if (desk) {
+    // Its language work is still running, or did not happen: the desk reads the original and is told which.
+    var work = MessageLanguageWork.FirstOrDefault(w => w.Message == message);
+    if (work != null && work.State != LanguageWorkState.Done) {
+      shown.Note = work.State == LanguageWorkState.Unavailable
+        ? "Not translated — " + (work.Problem ?? "the translator did not answer.")
+        : "Translating…";
+      shown.Pending = work.State != LanguageWorkState.Unavailable;
+      shown.CanRetry = work.State == LanguageWorkState.Unavailable;
+      return shown;
+    }
+    // No work, and a translator that is not ready: it came while it was not, and was not translated (`ApplyLanguage`).
+    if (work == null && setup.Translator != null && !setup.Translator!.IsReady()) {
+      shown.Note = "Not translated — " + setup.Translator!.NotReadyReason();
+      shown.CanRetry = true;
+      return shown;
+    }
+    if (message.Direction == MessageDirection.Inbound && message.Language != null
+        && !SameLanguage(message.Language, setup.CanonicalLanguage) && message.CanonicalText != null) {
+      shown.Text = message.CanonicalText!;
+      shown.Note = $"Translated from {setup.Copy.LanguageName(message.Language!)}";
+    } else if (message.Direction == MessageDirection.Outbound) {
+      var sent = MessageText.Where(r => r.Message == message && r.WasDelivered).Select(r => r.Language).ToList();
+      if (sent.Count > 0) { shown.Note = $"Sent in {string.Join(", ", sent.Select(l => setup.Copy.LanguageName(l)))}"; }
+    }
+    return shown;
+  }
+  var rendering = MessageText.Where(r => r.Message == message && r.WasDelivered).FirstOrDefault();
+  if (rendering != null) {
+    shown.Text = rendering.Text;
+    shown.Note = $"Translated from {setup.Copy.LanguageName(message.Language ?? setup.CanonicalLanguage)}";
+  }
+  return shown;
+}
+

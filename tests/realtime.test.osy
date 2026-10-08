@@ -1,0 +1,50 @@
+// Osysharp.Conversations — who may be live in a conversation. Presence and typing ride two topics: the customer-facing
+// one (both sides, a chat visitor included) and the desk's own (staff only — who has it open, who is writing a note).
+//
+// The desk (Ada), Cus, Dee and Eve are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using Osysharp.Collaboration;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void a_stranger_cannot_subscribe_to_a_conversation() {
+  Conversation? chat = null;
+  runas (new Visitor { Id = "visit-live" }) { chat = StartConversation("Are you there?", "Live"); }
+  var id = chat!.Id;
+
+  // Another browser, another customer: refused by the topic's own rule.
+  runas (new Visitor { Id = "visit-stranger" }) {
+    Assert.Denied(() => ConversationPresence.For(id).Listen());
+    Assert.Denied(() => ConversationTyping.For(id).Listen());
+  }
+  runas (Dee) { Assert.Denied(() => ConversationTyping.For(id).Listen()); }
+  // …and the desk's topic is staff's alone — not even the conversation's own customer joins it.
+  runas (new Visitor { Id = "visit-live" }) { Assert.Denied(() => RecordPresence.For(id).Listen()); }
+
+  // The controls: the visit that started it, and the desk, are admitted.
+  runas (new Visitor { Id = "visit-live" }) { ConversationTyping.For(id).Listen(); }
+  runas (Ada) {
+    ConversationTyping.For(id).Listen();
+    RecordPresence.For(id).Listen();
+  }
+}
+
+[Test(Desk)]
+void typing_shows_on_the_other_side_and_clears() {
+  Conversation? chat = null;
+  runas (new Visitor { Id = "visit-typing" }) { chat = StartConversation("Hello?", "Typing", "Eve"); }
+  var id = chat!.Id;
+  runas (Ada) {
+    var seen = ConversationTyping.For(id).Listen();
+    // The customer starts typing, then sends — the desk hears both, and the last word is "stopped".
+    runas (new Visitor { Id = "visit-typing" }) { TypingIn(chat!, true); }
+    Assert.Equal(1, seen.Count);
+    Assert.True(seen[0].Typing);
+    Assert.Equal("Eve", seen[0].Name);
+    runas (new Visitor { Id = "visit-typing" }) { TypingIn(chat!, false); }
+    Assert.Equal(2, seen.Count);
+    Assert.True(!seen[1].Typing);
+  }
+}

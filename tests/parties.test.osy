@@ -1,0 +1,280 @@
+// Osysharp.Conversations — parties and their contact points. A point is a CLAIM until a proof flow verifies it, and a
+// chat visitor's point is the one thing that lets a browser read a party's conversations — so who may make, read or
+// verify one is the whole of a customer's identity here.
+//
+// The desk (Ada), Cus, Dee and Eve are in model.test.osy.
+
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void a_visitor_point_cannot_be_planted_for_another_visit() {
+  Osysharp.Conversations.Party? mine = null;
+  runas (new Visitor { Id = "visit-mallory" }) {
+    mine = VisitorParty("Mallory");
+    UnitOfWork.Commit();
+    // A point naming ANOTHER browser's visit would make that browser's conversations hers.
+    Assert.Denied(() => {
+      new ContactPoint { Party = mine!, Kind = ContactPointKind.Visitor, Value = "visit-victim" };
+      UnitOfWork.Commit();
+    });
+    // The control: a claim to an address on her own party is fine — a claim, never a proof.
+    new ContactPoint { Party = mine!, Kind = ContactPointKind.Email, Value = "mallory@example.test" };
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal(0, ContactPoint.Count(p => p.Value == "visit-victim")); }
+}
+
+[Test(Desk)]
+void nobody_reads_a_visit_id() {
+  runas (new Visitor { Id = "visit-private" }) { StartConversation("Hello?", "Visit id"); }
+  // Not the desk — it is a browser's cookie, not something staff need or should hold…
+  runas (Ada) {
+    var point = ContactPoint.Single(p => p.Kind == ContactPointKind.Visitor && p.Party.DisplayName == "");
+    Assert.Equal(null, point.Value);
+  }
+  // …and not the visitor themselves.
+  runas (new Visitor { Id = "visit-private" }) {
+    var point = ContactPoint.Single(p => p.Kind == ContactPointKind.Visitor);
+    Assert.Equal(null, point.Value);
+  }
+}
+
+[Test(Desk)]
+void an_agent_cannot_mark_an_address_verified() {
+  runas (Ada) {
+    var cus = PartyOf("cus@example.test");
+    // An agent's "confirmed on the phone" is recorded as what it is…
+    new ContactPoint { Party = cus, Kind = ContactPointKind.Email, Value = "cus@work.test", AssertedBy = Session.CurrentUser };
+    UnitOfWork.Commit();
+    // …and is never proof: neither on a new point nor written onto one.
+    Assert.Denied(() => {
+      new ContactPoint { Party = cus, Kind = ContactPointKind.Phone, Value = "+46701234567",
+                         VerifiedKey = "Phone:+46701234567", VerifiedAt = DateTime.UtcNow, VerifiedBy = VerificationMethod.Code };
+      UnitOfWork.Commit();
+    });
+    var claimed = ContactPoint.Single(p => p.Value == "cus@work.test");
+    Assert.Denied(() => { claimed.VerifiedKey = "Email:cus@work.test"; UnitOfWork.Commit(); });
+  }
+  runas (Ada) { Assert.Equal(0, ContactPoint.Count(p => p.VerifiedKey != null)); }
+}
+
+// ── slice 6: resolution, proof, merge, linking ────────────────────────────────────────────────────────────────────
+
+principal Eve => Person.Single(p => p.Email == "eve@example.test");
+
+/// A mail arriving at support@ — as the mail adapter's receiver hands it over.
+InboundResult MailFrom(string from, string id, string text, string subject = "Help") {
+  return ReceiveInbound(new InboundMessage { ChannelKey = "email", Endpoint = "support@desk.test", From = from,
+                                             ExternalId = id, Subject = subject, Text = text });
+}
+
+/// The clocks that are due fire — a code's mail goes out.
+[SuppressWarning("cost-unbounded-read")]   // a test settles everything its own small world queued
+void CodesGoOut() {
+  foreach (var c in PointCheck.ToList()) { Workflow.Settle(c); }
+}
+
+/// The six digits in the newest code mail to `address`.
+string CodeMailedTo(string address) {
+  var mail = Carried.Where(c => c.To == address && c.Subject == "Your code").OrderByDescending(c => c.CreatedAt).First();
+  var at = mail.Text.IndexOf("Your code is ") + "Your code is ".Length;
+  return mail.Text.Substring(at, 6);
+}
+
+[Test(Desk)]
+void the_same_address_by_mail_twice_is_one_party() {
+  runas (Inbox) {
+    MailFrom("Ana@Example.test", "<a1@example.test>", "First question.", "One");
+    UnitOfWork.Commit();
+    MailFrom("ana@example.test", "<a2@example.test>", "Second question.", "Two");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    Assert.Equal(2, Conversation.Count());
+    Assert.Equal(1, ContactPoint.Count(p => p.Value == "ana@example.test"));
+    var one = Message.Single(m => m.Text == "First question.").ByParty;
+    var two = Message.Single(m => m.Text == "Second question.").ByParty;
+    Assert.Equal(one!.Id, two!.Id);
+  }
+}
+
+[Test(Desk)]
+void a_typed_address_in_the_widget_never_reaches_that_partys_history() {
+  runas (Inbox) { MailFrom("ana@example.test", "<a1@example.test>", "My private order question.", "Order"); UnitOfWork.Commit(); }
+  // A stranger types Ana's address in the widget.
+  runas (new Visitor { Id = "visit-mallory" }) {
+    StartConversation("Hi, it's Ana.", "Chat", "Ana", "ana@example.test");
+    Assert.Equal(0, Message.Count(m => m.Text == "My private order question."));
+    Assert.Equal(0, Conversation.Count(c => c.Subject == "Order"));
+  }
+  // The address is a claim on the stranger's OWN party; Ana's party is untouched.
+  runas (Ada) { Assert.Equal(2, ContactPoint.Count(p => p.Value == "ana@example.test" && p.VerifiedKey == null)); }
+}
+
+[Test(Desk)]
+void proving_the_typed_address_with_a_code_merges_the_visit_into_that_party() {
+  runas (Inbox) { MailFrom("ana@example.test", "<a1@example.test>", "My order question.", "Order"); UnitOfWork.Commit(); }
+  runas (new Visitor { Id = "visit-ana" }) {
+    StartConversation("Hello again — any news?", "Chat", "Ana", "ana@example.test");
+    Assert.Equal("", SendAddressCode("ana@example.test"));
+  }
+  runas (Ada) { CodesGoOut(); }
+  var code = "";
+  runas (Ada) { code = CodeMailedTo("ana@example.test"); }
+  runas (new Visitor { Id = "visit-ana" }) {
+    // A wrong code proves nothing…
+    Assert.Equal("That is not the code we sent — check it and try again.", ProveAddress("ana@example.test", "000000" == code ? "111111" : "000000"));
+    Assert.Equal(0, Message.Count(m => m.Text == "My order question."));
+    // …the right one makes this browser Ana: her mailed conversation is now hers to read here.
+    Assert.Equal("", ProveAddress("ana@example.test", code));
+  }
+  runas (new Visitor { Id = "visit-ana" }) {
+    Assert.Equal(1, Message.Count(m => m.Text == "My order question."));
+    Assert.Equal(2, Conversation.Count());
+  }
+  runas (Ada) {
+    var merge = PartyMerge.Single();
+    Assert.True(merge.Automatic);
+    Assert.Equal(MergeState.Merged, merge.State);
+    // The address is proven on the party that lives on, and the visit's party points at it.
+    var proven = ContactPoint.Single(p => p.VerifiedKey == "Email:ana@example.test");
+    Assert.Equal(merge.Kept.Id, proven.Party.Id);
+    Assert.Equal(VerificationMethod.Code, proven.VerifiedBy);
+  }
+}
+
+[Test(Desk)]
+void signing_in_links_the_party_whose_address_is_proven() {
+  // Eve proves her address in the chat — the desk has never heard of it, so her own party holds it proven.
+  runas (new Visitor { Id = "visit-eve" }) {
+    StartConversation("Can I change my delivery address?", "Delivery", "Eve", "eve@example.test");
+    SendAddressCode("eve@example.test");
+  }
+  runas (Ada) { CodesGoOut(); }
+  var code = "";
+  runas (Ada) { code = CodeMailedTo("eve@example.test"); }
+  runas (new Visitor { Id = "visit-eve" }) { Assert.Equal("", ProveAddress("eve@example.test", code)); }
+  // She signs in with an account on the same, proven address: the sign-in flow links them.
+  runas (AuthBootstrap) { LinkSignedInAccount(Person.Single(p => p.Email == "eve@example.test"), "eve@example.test", true); }
+  runas (Eve) {
+    Assert.Equal(1, Conversation.Count(c => c.Subject == "Delivery"));
+    Assert.Equal(1, Message.Count(m => m.Text == "Can I change my delivery address?"));
+  }
+}
+
+[Test(Desk)]
+void signing_in_does_not_link_an_unproven_claim() {
+  // Someone MAILED as eve@ — a From header, not a proof.
+  runas (Inbox) { MailFrom("eve@example.test", "<e1@example.test>", "Send the refund to this account: …", "Refund"); UnitOfWork.Commit(); }
+  runas (AuthBootstrap) { LinkSignedInAccount(Person.Single(p => p.Email == "eve@example.test"), "eve@example.test", true); }
+  // Eve's account opens a party of its own, proven by her sign-in — not the mail's.
+  runas (Eve) { Assert.Equal(0, Conversation.Count(c => c.Subject == "Refund")); }
+  runas (Ada) {
+    Assert.Equal(1, ContactPoint.Count(p => p.Value == "eve@example.test" && p.VerifiedKey != null));
+    var mailed = Message.Single(m => m.Text.StartsWith("Send the refund")).ByParty!;
+    Assert.Equal(null, mailed.Account);
+  }
+  // An account whose address is not proven links nothing at all.
+  runas (AuthBootstrap) { LinkSignedInAccount(Person.Single(p => p.Email == "dee@example.test"), "dee@other.test", false); }
+  runas (Ada) { Assert.Equal(0, ContactPoint.Count(p => p.Value == "dee@other.test")); }
+}
+
+[Test(Desk)]
+void merging_moves_points_and_conversations_and_can_be_undone() {
+  runas (Inbox) {
+    MailFrom("bo@example.test", "<b1@example.test>", "By mail.", "Mail");
+    UnitOfWork.Commit();
+    ReceiveInbound(new InboundMessage { ChannelKey = "sms", Endpoint = "+46700000000", From = "+46701112233",
+                                        ExternalId = "sms-1", Text = "By text." });
+    UnitOfWork.Commit();
+  }
+  Guid mergeId = Guid.Empty;
+  runas (Ada) {
+    var byMail = Message.Single(m => m.Text == "By mail.").ByParty!;
+    var byText = Message.Single(m => m.Text == "By text.").ByParty!;
+    (byText as ConversationsKitTests.Party)!.Tier = "gold";
+    UnitOfWork.Commit();
+    // The desk sees they are probably one person only when they share something — here they do not, so it decides.
+    var merge = MergeParties(byMail, byText, "Same person — confirmed on the phone.");
+    Assert.Equal(MergeState.Merged, merge.State);
+    mergeId = merge.Id;
+  }
+  runas (Ada) {
+    var kept = Message.Single(m => m.Text == "By mail.").ByParty!;
+    // Both messages are the kept party's now, both points are on it, and it sits in both conversations.
+    Assert.Equal(kept.Id, Message.Single(m => m.Text == "By text.").ByParty!.Id);
+    Assert.Equal(2, ContactPoint.Count(p => p.Party == kept));
+    Assert.Equal(2, Participant.Count(p => p.Party == kept));
+    Assert.Equal(1, ConversationEvent.Count(e => e.Kind == "conversations.parties-merged" && e.Conversation.Subject == null));
+    // The app's own field came along (`DeskParties.Merge`).
+    Assert.Equal("gold", (kept as ConversationsKitTests.Party)!.Tier);
+    UnmergeParties(mergeId);
+  }
+  runas (Ada) {
+    var mailParty = Message.Single(m => m.Text == "By mail.").ByParty!;
+    var textParty = Message.Single(m => m.Text == "By text.").ByParty!;
+    Assert.True(mailParty.Id != textParty.Id);
+    Assert.Equal(null, textParty.MergedInto);
+    Assert.Equal(1, ContactPoint.Count(p => p.Party == textParty));
+    Assert.Equal(MergeState.Undone, PartyMerge.Single().State);
+  }
+}
+
+[Test(Desk)]
+void merging_two_signed_in_parties_is_refused() {
+  runas (Ada) {
+    var merge = MergeParties(PartyOf("cus@example.test"), PartyOf("dee@example.test"));
+    Assert.Equal(MergeState.Refused, merge.State);
+    Assert.Contains("Both parties have an account", merge.Problem!);
+  }
+  runas (Ada) { Assert.Equal(null, PartyOf("dee@example.test").MergedInto); }
+  // Each still reads only their own.
+  runas (Ada) { OpenConversation(PartyOf("dee@example.test"), "Dee only"); UnitOfWork.Commit(); }
+  runas (Cus) { Assert.Equal(0, Conversation.Count(c => c.Subject == "Dee only")); }
+}
+
+[Test(Desk)]
+void mail_for_a_merged_party_lands_on_the_survivor() {
+  runas (Inbox) {
+    MailFrom("old@example.test", "<o1@example.test>", "From my old address.", "Old");
+    UnitOfWork.Commit();
+    MailFrom("new@example.test", "<n1@example.test>", "From my new address.", "New");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    MergeParties(Message.Single(m => m.Text == "From my new address.").ByParty!,
+                 Message.Single(m => m.Text == "From my old address.").ByParty!);
+  }
+  runas (Inbox) { MailFrom("old@example.test", "<o2@example.test>", "Still using the old one.", "Old again"); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var kept = Message.Single(m => m.Text == "From my new address.").ByParty!;
+    Assert.Equal(kept.Id, Message.Single(m => m.Text == "Still using the old one.").ByParty!.Id);
+  }
+}
+
+[Test(Desk)]
+void the_desk_is_shown_who_is_probably_the_same_and_nothing_merges_by_itself() {
+  runas (Inbox) { MailFrom("ana@example.test", "<a1@example.test>", "By mail.", "Mail"); UnitOfWork.Commit(); }
+  runas (new Visitor { Id = "visit-ana" }) { StartConversation("In the chat.", "Chat", "Ana", "ana@example.test"); }
+  runas (Ada) {
+    var chatter = Message.Single(m => m.Text == "In the chat.").ByParty!;
+    var mailer = Message.Single(m => m.Text == "By mail.").ByParty!;
+    var same = ProbablyTheSame(chatter);
+    Assert.Equal(1, same.Count);
+    Assert.Equal(mailer.Id, same[0].Id);
+    Assert.Equal(0, PartyMerge.Count());
+  }
+}
+
+[Test(Desk)]
+void the_desks_sign_in_admits_the_right_password_and_nothing_else() {
+  // Ada, an agent, has a password (model.test.osy); a customer has none.
+  Assert.NotEqual("", SignIn("ada@desk.test", "ada-desk-pass-1"));
+  Assert.Equal("", SignIn("ada@desk.test", "anything"));
+  // A person with no password (a customer) has no door here at all.
+  Assert.Equal("", SignIn("cus@example.test", "anything"));
+  Assert.Equal("", SignIn("nobody@example.test", "anything"));
+}
+

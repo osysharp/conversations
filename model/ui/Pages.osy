@@ -1,0 +1,65 @@
+// The two pages a follow-up mail leads to, served at the kit's routes (`ConversationsSetup.ContinuePath` and
+// `ChatPath`) in every app that uses the kit:
+//
+//     /conversations/continue/{link}   ConversationContinuePage — "carry on here", then the chat
+//     /conversations/chat              ConversationChatPage     — the customer's chat, full page
+//
+// ⚑ AN APP TAKES ONE OVER by declaring a component of the same name (its own frame, its own route) — and an app whose
+//   widget lives on a page of its own names that page as `ChatPath` and the browser goes there instead.
+
+namespace Osysharp.Conversations;
+
+using Osysharp.Ui;
+
+/// The frame both pages stand in — centred, on the app's background, every colour and face a theme token.
+[Composable]
+public component ConversationFrame() {
+  render {
+    Row(justify: Justify.Center, align: Align.Start, minH: "100dvh", p: 4, bg: Colors.Bg, color: Colors.OnBg) {
+      Stack(gap: 4, w: "100%", maxW: "36rem", pt: 8) { Slot; }
+    }
+  }
+}
+
+/// What a continue link opens: one button that makes THIS browser the conversation's — pressed, never on the page
+/// merely opening, so a mail scanner that follows the link uses nothing up. A link that was used, ran out or is not one
+/// never reaches it: the platform answers "This link has expired or is not valid." first.
+[Composable]
+[AllowAnonymous]
+public component ConversationContinue(ConversationContinueLink link) {
+  bool going = false;
+  string problem = "";
+  action Continue() {
+    going = true;
+    problem = "";
+    try {
+      ContinueHere(link);
+      Navigation.Go(ChatPath());
+    } catch (Exception ex) { problem = ex.Message; }
+    going = false;
+  }
+  render {
+    Stack(gap: 4, w: "100%", label: "Continue the conversation") {
+      Stack(gap: 1) {
+        Text("Carry on where you left off", fontFamily: Font.Display, fontSize: FontSize.Title, fontWeight: FontWeight.Bold,
+             lineHeight: "1.15");
+        Text("The conversation opens here, in this browser, with everything said so far — and stays here when you come back.",
+             color: Colors.TextMuted);
+      }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      Button("Continue here", onPress: Continue, tone: Tone.Primary, disabled: going);
+      Text("The link works once. If you did not ask us anything, you can ignore it.", color: Colors.TextMuted,
+           fontSize: FontSize.Caption);
+    }
+  }
+}
+
+[Page("/conversations/continue/{link}")] [Title("Continue the conversation")] [AllowAnonymous] [Render(CSR)]
+public component ConversationContinuePage(ConversationContinueLink link) {
+  render { ConversationFrame() { Card() { ConversationContinue(link); } } }
+}
+
+[Page("/conversations/chat")] [Title("Your conversation")] [AllowAnonymous] [Render(CSR)]
+public component ConversationChatPage() {
+  render { ConversationFrame() { ConversationWidget(); } }
+}
