@@ -6,8 +6,8 @@
     {
       "name": "Osysharp.Collaboration",
       "kind": "package",
-      "version": "0.1.1",
-      "hash": "sha256:f51e3ea987b977c943ae226435085f4be8d9601eb4daac409d4c636a41cef55b",
+      "version": "0.1.2",
+      "hash": "sha256:ff89f12aa16a64fcaccfb4688c0e22c2827915473e6b37f29bc23e0ae2fd225c",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/collaboration",
@@ -16,8 +16,8 @@
     {
       "name": "Osysharp.Identity",
       "kind": "package",
-      "version": "0.8.0",
-      "hash": "sha256:7fadb5f2628cfd6895c44d2e88725b39055ea36c3a8276b3b345c72a931f4358",
+      "version": "0.8.1",
+      "hash": "sha256:83723f5577bbbb2aea58fbee2360a4e00db5c2cfd35f8532ce7be70be153b6fd",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/identity",
@@ -44,8 +44,8 @@
     {
       "name": "Osysharp.Conversations",
       "kind": "package",
-      "version": "0.25.0",
-      "hash": "sha256:68561167491179c3f426264ab1a8139ee418cb7c6ffa5a3fe26904eae61e5dde",
+      "version": "0.25.1",
+      "hash": "sha256:5d1c691e0b999e707e847f0fb52b4fe20e36f7ca96accbb214addde6365e70fc",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/conversations",
@@ -91,8 +91,8 @@
     {
       "name": "Osysharp.Conversations.Sms",
       "kind": "package",
-      "version": "0.1.1",
-      "hash": "sha256:665e47aa47539a9a5726a17d617792f5e76f8bd2968d25207661b200031c7d13",
+      "version": "0.1.2",
+      "hash": "sha256:a394bbfa6afe968f77fff8ead12ea02c1726b88b50cdc2ef7b260086455ec597",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/conversations-sms",

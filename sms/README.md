@@ -27,7 +27,7 @@ using Osysharp.Conversations.Sms;
 app.Sms = new SmsSetup { Sender = new ElksSmsSender { Username = …, Password = … } };
 app.Conversations = new ConversationsSetup { Channels = [new SmsConversationChannel { Number = "+46766861004" }] };
 
-// The carrier's inbound webhook and delivery report, until the platform's signed receivers land:
+// The app's own endpoint for the carrier's inbound webhook and delivery report calls:
 //   ReceiveSms(from, to, message, id);  SmsDeliveryReport(id, delivered, problem);
 ```
 
