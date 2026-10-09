@@ -1,0 +1,130 @@
+// A support desk that answers by mail — the smallest correct consumer of Osysharp.Conversations.Mail.
+namespace ConversationsMailTests;
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Conversations;
+
+[Role] enum AppRole { Authenticator, Agent, Integration }
+
+/// The desk's staff: its agents, and the account the mailbox receiver runs as.
+policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && (g.Role == AppRole.Agent || g.Role == AppRole.Integration));
+// Who manages the mailboxes (Osysharp.Mail.Receiving's page) — this app has no admins, so its conversationstaff staff.
+policy ManagesMailboxes => IsConversationStaff;
+// Who sits on a conversation (and any record) with the desk — the Collaboration kit's question.
+policy CollaboratesOnRecords => IsConversationStaff;
+
+entity Person : Principal {
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+  }
+}
+
+partial entity Osysharp.Conversations.Party { security { allow read, create, update when IsConversationStaff; } }
+partial entity ContactPoint { security { allow read, create, update when IsConversationStaff; } }
+partial entity Conversation { security { allow read, create, update when IsConversationStaff; } }
+partial entity Participant { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationEntry { security { allow read when IsConversationStaff; } }
+partial entity Message { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationEvent { security { allow read, create when IsConversationStaff; } }
+partial entity MessageText { security { allow read, create when IsConversationStaff; } }
+partial entity MessageAttachment { security { allow read, create when IsConversationStaff; } }
+// The desk's staff read what its mailbox received, and watch it.
+partial entity ReceivedMail { security { allow read when IsConversationStaff; } }
+partial entity MailboxWatch { security { allow read, create when IsConversationStaff; } }
+partial entity MessageDelivery { security { allow read, create, update when IsConversationStaff; } }
+partial entity ConversationThreadKey { security { allow read, create when IsConversationStaff; } }
+partial entity PartyMerge { security { allow read, create when IsConversationStaff; } }
+partial entity ConversationSplit { security { allow read, create when IsConversationStaff; } }
+partial entity PartyErasure { security { allow read when IsConversationStaff; } }
+// The desk's staff send mail — replies on conversations — and read what they sent.
+partial entity OutgoingMail { security { allow create, read when IsConversationStaff; } }
+partial entity OutgoingMailFile { security { allow create, read when IsConversationStaff; } }
+
+/// What the carrier was handed — one row per mail the sender sent.
+entity Carried {
+  [MaxLength(255)] string From = "";
+  [Required, MaxLength(1000)] string To;
+  [Required, MaxLength(300)] string Subject;
+  string Text = "";
+  [Required, MaxLength(255)] string MessageId;
+  [MaxLength(255)] string InReplyTo = "";
+  string References = "";
+  [MaxLength(1000)] string ReplyTo = "";
+  security { allow read, create when IsAuthenticated; }
+}
+
+/// A switch a test flips: the mail sender's credentials are missing.
+entity SenderState {
+  bool Unconfigured = false;
+  security { allow read, create when IsAuthenticated; }
+}
+
+/// A mail sender that records instead of sending.
+public class RecordingSender : IMailSender {
+  public string Key { get; } = "recording";
+  public bool IsReady() { return !SenderState.Any(s => s.Unconfigured); }
+  public string NotReadyReason() { return "The recording sender has no API key."; }
+  public string SendMail(MailMessage message, string idempotencyKey) {
+    new Carried { From = message.From, To = string.Join(", ", message.To), Subject = message.Subject, Text = message.Text ?? "",
+                  MessageId = message.MessageId, InReplyTo = message.InReplyTo, References = string.Join(" ", message.References),
+                  ReplyTo = string.Join(", ", message.ReplyTo) };
+    return "carried-" + idempotencyKey;
+  }
+}
+
+// ── the watched mailbox (Osysharp.Mail.Receiving) — a fake provider at the IMailbox seam ─────────────────────────────
+
+/// What the fake provider holds — one row per message "in the mailbox", in arrival order.
+entity Inbound {
+  [Required] int Seq;
+  [Required] byte[] Raw;
+  security { allow read, create when IsAuthenticated; }
+}
+
+/// support@desk.test, watched: `Fetch` hands over every `Inbound` row after the cursor.
+public class FakeMailbox : IMailbox {
+  public string Key { get; } = "fake";
+  public string Address { get; set; } = "";
+  public bool IsReady() { return true; }
+  public MailboxPage Fetch(string cursor, int max) {
+    if (cursor == "") { return new MailboxPage { Cursor = "0" }; }
+    var after = int.Parse(cursor);
+    var page = new MailboxPage { Cursor = cursor };
+    foreach (var i in Inbound.Where(i => i.Seq > after).OrderBy(i => i.Seq).Take(max).ToList()) {
+      page.Items.Add(new MailboxItem { ProviderId = "p-" + i.Seq.ToString(), Raw = i.Raw });
+      page.Cursor = i.Seq.ToString();
+    }
+    return page;
+  }
+  /// The desk's replies go out through the app's sender in these tests; the mailbox only reads.
+  public string SendMail(MailMessage message, string idempotencyKey) { return new RecordingSender().SendMail(message, idempotencyKey); }
+}
+
+/// A message arrives in the watched mailbox.
+void Arrive(int seq, string raw) {
+  new Inbound { Seq = seq, Raw = Encoding.UTF8.GetBytes(raw) };
+}
+
+// ── what an erasure run asks of a channel ─────────────────────────────────────────────────────────────────────────
+// A channel's `EraseCopiesTo` deletes what no person may — the outbox the kit keeps — so it is called only from a run:
+// in a real app, the Conversations kit's erasure run, when a privacy request's plan erases a person's contact points
+// (Osysharp.Privacy.Conversations). This desk has no privacy kit, so its tests ask the channel through a run of its own.
+
+enum CopyErasureState { Erased }
+
+/// One address whose copies the channel is asked to forget.
+entity CopyErasure {
+  [Required, MaxLength(255)] string Address;
+  CopyErasureState State;
+  security { allow read, create when IsConversationStaff; }
+}
+
+workflow CopyErasing {
+  Tracks    = CopyErasure.State;
+  Autostart = true;
+  Initial   = Erased;
+  state Erased { enter { ChannelReaching(ContactPointKind.Email)!.EraseCopiesTo(this.Item.Address); } }
+}

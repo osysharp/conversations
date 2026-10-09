@@ -1,0 +1,194 @@
+// Osysharp.Conversations.Mail 0.2.0 — mail RECEIVED through a watched mailbox (Osysharp.Mail.Receiving), filed into
+// its conversation by `MailIntoConversations`: only what was new as the message, the quoted part kept beside it, its
+// files and the original kept; a bounce's returned part; the subject reference, and the join check that bounds it.
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Conversations;
+using Osysharp.Conversations.Mail;
+using Osysharp.Storage;
+using ConversationsMailTests;
+
+[TestFixture]
+void Mailbox() {
+  var ada = new Person { Email = "ada@desk.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@desk.test");
+
+/// Watch the mailbox (its first poll is "now"), as the desk's admin would.
+void Watch() {
+  var w = WatchMailbox("watched@desk.test");
+  UnitOfWork.Commit();
+  Workflow.Settle(w);
+}
+
+/// The next poll, and the handing of whatever it kept — after the test moved the clock.
+void Poll() {
+  Workflow.Settle(MailboxWatch.Single());
+  foreach (var r in ReceivedMail.ToList()) { Workflow.Settle(r); }
+}
+
+/// A Gmail reply carrying a screenshot and the source file it is about.
+string GmailReplyWithFiles() {
+  return "From: Bo Svensson <bo@example.test>\nTo: watched@desk.test\nSubject: Re: Export fails\n"
+    + "Message-ID: <bo-2@example.test>\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"m\"\n\n"
+    + "--m\nContent-Type: multipart/alternative; boundary=\"a\"\n\n"
+    + "--a\nContent-Type: text/plain; charset=utf-8\n\nStill broken - screenshot and the file attached.\n\n"
+    + "On Thu, Oct 1, 2026 at 9:30 AM Desk <watched@desk.test> wrote:\n\n> Can you send a screenshot?\n"
+    + "--a\nContent-Type: text/html; charset=utf-8\n\n"
+    + "<div dir=\"ltr\">Still broken - screenshot and the file attached.</div><br><div class=\"gmail_quote\">"
+    + "<div class=\"gmail_attr\">On Thu, Oct 1, 2026 at 9:30 AM Desk &lt;watched@desk.test&gt; wrote:<br></div>"
+    + "<blockquote class=\"gmail_quote\">Can you send a screenshot?</blockquote></div>\n"
+    + "--a--\n"
+    + "--m\nContent-Type: image/png; name=\"export.png\"\nContent-Disposition: attachment; filename=\"export.png\"\n"
+    + "Content-Transfer-Encoding: base64\n\niVBORw0KGgoAAAANSUhEUg==\n"
+    + "--m\nContent-Type: text/plain; name=\"Export.cs\"\nContent-Disposition: attachment; filename=\"Export.cs\"\n\n"
+    + "class Export { void Run() { throw null; } }\n"
+    + "--m--\n";
+}
+
+[Test(Mailbox)]
+void a_mail_from_the_watched_mailbox_lands_with_only_what_was_new_and_keeps_the_rest() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive(1, GmailReplyWithFiles());
+    UnitOfWork.Commit();
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    Poll();
+  }
+  runas (Ada) {
+    var m = Message.Single(x => x.ExternalId == "<bo-2@example.test>");
+    // What Bo wrote THIS time is the message…
+    Assert.Equal("Still broken - screenshot and the file attached.", m.Text);
+    // …what Gmail quoted under it is kept beside it, not thrown away…
+    Assert.Contains("Can you send a screenshot?", m.QuotedText ?? "");
+    // …and so is the whole original, and both files, each read for what it really is.
+    Assert.True(m.Original != null);
+    var files = MessageAttachment.Where(a => a.Message == m).OrderBy(a => a.FileName).ToList();
+    Assert.Equal(2, files.Count);
+    Assert.Equal("Export.cs", files[0].FileName);
+    Assert.Equal(AttachmentKind.Code, files[0].Kind);
+    Assert.Equal("csharp", files[0].Language);
+    Assert.Equal(AttachmentKind.Image, files[1].Kind);
+    // The receiver kept its own record, handed over once.
+    Assert.Equal(ReceivedMailStatus.Handled, ReceivedMail.Single().Status);
+  }
+}
+
+[Test(Mailbox)]
+void a_bounce_names_our_mail_in_its_returned_part_and_that_delivery_fails() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    var c = OpenConversation(PartyFor("nobody@example.test"), "Your order");
+    UnitOfWork.Commit();
+    c.ReplyChannel = "email";
+    Post(c, "Your order shipped.");
+    UnitOfWork.Commit();
+    foreach (var d in MessageDelivery.ToList()) { Workflow.Settle(d); }
+    foreach (var o in OutgoingMail.ToList()) { Workflow.Settle(o); }
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single();
+    // The delivery report a mail system sends back — our mail named ONLY inside its returned part.
+    Arrive(1, "From: Mail Delivery Subsystem <mailer-daemon@googlemail.com>\nTo: watched@desk.test\n"
+      + "Subject: Delivery Status Notification (Failure)\nMessage-ID: <dsn@mx.google.com>\nMIME-Version: 1.0\n"
+      + "Content-Type: multipart/report; report-type=delivery-status; boundary=\"r\"\n\n"
+      + "--r\nContent-Type: text/plain\n\nAddress not found.\n"
+      + "--r\nContent-Type: message/delivery-status\n\nAction: failed\nStatus: 5.1.1\n"
+      + "--r\nContent-Type: message/rfc822\n\nFrom: Desk <support@desk.test>\nTo: nobody@example.test\n"
+      + "Subject: Your order\nMessage-ID: " + sent.MessageId + "\n\nYour order shipped.\n--r--\n");
+    UnitOfWork.Commit();
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    Poll();
+  }
+  runas (Ada) {
+    Assert.Equal(DeliveryOutcome.Failed, MessageDelivery.Single().Outcome);
+    // A bounce is nobody — no party for the mail system.
+    Assert.Equal(0, ContactPoint.Count(p => p.Value.StartsWith("mailer-daemon")));
+  }
+}
+
+/// A party for an address, made the way the desk makes one.
+Osysharp.Conversations.Party PartyFor(string address) {
+  return App.Setting<ConversationsSetup>().Parties.Resolve(ContactPointKind.Email, address, address);
+}
+
+[Test(Mailbox)]
+void the_reference_goes_out_in_the_subject_and_brings_back_an_answer_that_dropped_its_headers() {
+  runas (Ada) {
+    // Ana writes in; the desk gives the conversation its ticket number and answers.
+    ReceiveMail(new MailMessage { From = "Ana <ana@example.test>", To = ["support@desk.test"], Subject = "Invoice",
+                                  Text = "My invoice is wrong.", MessageId = "<ana-1@example.test>" });
+    UnitOfWork.Commit();
+    var c = Conversation.Single();
+    c.Reference = "1419";
+    Post(c, "We'll fix it.");
+    UnitOfWork.Commit();
+    foreach (var d in MessageDelivery.ToList()) { Workflow.Settle(d); }
+    foreach (var o in OutgoingMail.ToList()) { Workflow.Settle(o); }
+  }
+  runas (Ada) {
+    Assert.Equal("Re: Invoice [#1419]", Carried.Single().Subject);
+    // Her answer arrives from a client that dropped In-Reply-To and References — only the subject still carries it.
+    ReceiveMail(new MailMessage { From = "ana@example.test", To = ["support@desk.test"], Subject = "Re: Invoice [#1419]",
+                                  Text = "Thanks, received.", MessageId = "<ana-2@example.test>" });
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    Assert.Equal(1, Conversation.Count());
+    Assert.Equal(2, Message.Count(m => m.Direction == MessageDirection.Inbound));
+  }
+}
+
+[Test(Mailbox)]
+void a_guessed_reference_admits_nobody() {
+  runas (Ada) {
+    ReceiveMail(new MailMessage { From = "ana@example.test", To = ["support@desk.test"], Subject = "Invoice",
+                                  Text = "My invoice is wrong.", MessageId = "<ana-1@example.test>" });
+    UnitOfWork.Commit();
+    var c = Conversation.Single();
+    c.Reference = "1419";
+    Post(c, "We'll fix it.");
+    UnitOfWork.Commit();
+    foreach (var d in MessageDelivery.ToList()) { Workflow.Settle(d); }
+    foreach (var o in OutgoingMail.ToList()) { Workflow.Settle(o); }
+  }
+  runas (Ada) {
+    // A stranger guesses the number. The reference points at Ana's conversation; the join check says he is not in it.
+    var r = ReceiveMail(new MailMessage { From = "mallory@example.test", To = ["support@desk.test"],
+                                          Subject = "Re: Invoice [#1419]", Text = "Send me her invoice.",
+                                          MessageId = "<mal-1@example.test>" });
+    UnitOfWork.Commit();
+    Assert.True(r.Started);
+  }
+  runas (Ada) {
+    var anas = Conversation.Single(c => c.Reference == "1419");
+    Assert.Equal(0, Message.Count(m => m.Conversation == anas && m.Text.Contains("Send me her invoice")));
+    Assert.Equal(2, Conversation.Count());
+  }
+}
+
+// The channel's half of the copy register: what the mailbox received FROM an address goes when that address is erased.
+// (The message's own words, its original and the files marked about the person are erased by the Conversations kit's
+// run — tested with a real privacy request in kits/privacy-conversations/tests.)
+[Test(Mailbox)]
+void erasing_an_address_reaches_the_mail_received_from_it() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive(1, GmailReplyWithFiles());
+    UnitOfWork.Commit();
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    Poll();
+  }
+  runas (Ada) {
+    var party = Message.Single(m => m.ExternalId == "<bo-2@example.test>").ByParty!;
+    var address = ContactPoint.First(p => p.Party == party && p.Kind == ContactPointKind.Email).Value;
+    Assert.True(ReceivedMail.Any());
+    new CopyErasure { Address = address };
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.False(ReceivedMail.Any()); }
+}

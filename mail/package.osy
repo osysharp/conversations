@@ -1,0 +1,30 @@
+// Osysharp.Conversations.Mail — email as a channel for Osysharp.Conversations.
+//
+// A reply the desk writes on a conversation the customer started by mail goes out THROUGH Osysharp.Mail's outbox — from
+// the address the customer wrote to, threaded (In-Reply-To and References), so it lands in the customer's thread — and
+// the Message-ID it went out under is registered on the conversation, so their answer comes back to it. A mail received
+// becomes an inbound message: who it is from, which conversation it continues, whom else it was addressed to. An
+// out-of-office or a bounce is recognised: recorded, never answered, and a bounce marks the delivery it answers failed.
+//
+// ⚑ A BRIDGE, NOT A PART OF EITHER KIT. Mail stays usable without conversations (a shop sends receipts), and
+//   conversations stay usable without mail (a chat-only desk). An app that wants both names this channel:
+//     app.Conversations = new ConversationsSetup { Channels = [new MailConversationChannel { Endpoints = ["support@acme.com"] }] };
+//
+// ⚠ RECEIVING: the monitored-mailbox receiver (Gmail / Microsoft 365 over OAuth, IMAP — D-RECEIVE1 stage 1b) hands each
+//   mail to `ReceiveMail`. Until it lands, `ReceiveMail` is the entry point a test (or an app's own webhook) calls.
+package Osysharp.Conversations.Mail {
+  version     "0.4.0";
+  minPlatform "0.9.0";
+  summary     "email as a channel for Osysharp.Conversations — replies through Osysharp.Mail's outbox, from the address the customer wrote to and threaded; a mail received continues its conversation; out-of-office replies and bounces recognised.";
+  completes   Osysharp.Conversations@0, Osysharp.Mail.Receiving@0;
+  model "model/*.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Mail@0;
+  // A mail received through a watched mailbox continues its conversation, with its files and its original.
+  use Osysharp.Mail.Receiving@0;
+  use Osysharp.Conversations@0;
+  use Osysharp.Workflow;
+  use Osysharp.Ui;
+  use Osysharp.Storage;
+  tests "tests";
+}

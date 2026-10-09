@@ -1,0 +1,266 @@
+namespace Osysharp.Conversations.Mail;
+
+using Osysharp.Conversations;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Storage;
+
+/// Email as a conversation channel. `Endpoints` are the support addresses mail arrives at — a reply goes FROM the one the
+/// conversation arrived on (`Conversation.ReplyEndpoint`), else the first.
+///
+///   app.Conversations = new ConversationsSetup {
+///     Channels = [new MailConversationChannel { Endpoints = ["support@acme.com", "billing@acme.com"] }],
+///   };
+public class MailConversationChannel : IConversationChannel {
+  public string Key { get; } = "email";
+  public ContactPointKind Reaches { get; } = ContactPointKind.Email;
+  /// The addresses that are OURS — a mail to any of them is a mail to the desk.
+  public List<string> Endpoints = [];
+  /// The addresses that are ours, asked when a mail goes or comes — `Endpoints` by default. An app whose support address
+  /// is a setting overrides it and reads the setting HERE, so the read is paid when mail moves and not on every read of
+  /// the app's conversations setup:
+  ///
+  ///   public class DeskMailChannel : MailConversationChannel {
+  ///     public override List<string> Addresses() { return [SupportAddressSetting()]; }
+  ///   }
+  public virtual List<string> Addresses() { return Endpoints; }
+  /// Reply-To a PLUS-ADDRESSED endpoint naming the conversation (`support+c-<id>@acme.com`), so an answer whose mail
+  /// client dropped `In-Reply-To` and `References` still finds its conversation. Off by default: it needs the mailbox to
+  /// accept plus addresses (Gmail and Microsoft 365 do), or the customer's answer bounces. The address only POINTS — its
+  /// sender must still be in the thread to continue it.
+  public bool PlusAddressReplies = false;
+  /// A conversation's REFERENCE written into the subject of every reply, and read back from a subject as the last way an
+  /// answer finds its conversation — `"[#{reference}]"` writes "Re: Printer on fire [#1419]". `{reference}` is
+  /// `Conversation.Reference`, which the app sets (a ticket number); "" is off. Read back ONLY together with the join
+  /// check: a reference is guessable, so it can point at a conversation but never admits anyone by itself.
+  public string SubjectReference = "";
+
+  /// Ready when the app's mail sender is — the reply goes through its outbox.
+  public bool IsReady() {
+    var sender = App.Setting<MailSetup>().Sender;
+    return sender != null && sender.IsReady();
+  }
+
+  /// The mail sender's own reason, so the desk reads what to fix.
+  public string NotReadyReason() {
+    var sender = App.Setting<MailSetup>().Sender;
+    return sender == null
+      ? "No mail sender is set up — name one in app.Mail (`Sender = new ResendSender { … }`)."
+      : sender.NotReadyReason();
+  }
+
+  /// A person is being forgotten: the mail outbox forgets what it sent them, and the receiver what came from them.
+  public void EraseCopiesTo(string to) {
+    EraseMailTo(to);
+    EraseMailFrom(to);
+  }
+
+  /// One message is being erased: the outbox forgets the mail that carried it — what it said and who it went to.
+  public void EraseCopyOf(string externalId) { ForgetSentMail(externalId); }
+
+  /// The subject with this conversation's reference in it — once, at the end.
+  string WithReference(string subject, Guid conversationId) {
+    var reference = Conversation.Where(c => c.Id == conversationId).Select(c => c.Reference).FirstOrDefault();
+    if (reference == null || reference == "") { return subject; }
+    var token = SubjectReference.Replace("{reference}", reference);
+    return subject.Contains(token) ? subject : subject + " " + token;
+  }
+
+  /// The reference a subject carries in this channel's format, or null.
+  public string? ReferenceIn(string subject) {
+    var marker = SubjectReference.IndexOf("{reference}");
+    if (SubjectReference == "" || marker < 0) { return null; }
+    var prefix = SubjectReference.Substring(0, marker);
+    var suffix = SubjectReference.Substring(marker + 11);
+    var at = prefix == "" ? -1 : subject.LastIndexOf(prefix);
+    if (at < 0) { return null; }
+    var rest = subject.Substring(at + prefix.Length);
+    var end = suffix == "" ? rest.Length : rest.IndexOf(suffix);
+    if (end <= 0 || end > 60) { return null; }
+    var reference = rest.Substring(0, end);
+    return Regex.IsMatch(reference, "^[A-Za-z0-9._-]+$") ? reference : null;
+  }
+
+  /// Hand the reply to the mail outbox, threaded, from our endpoint; answer its Message-ID (the conversation keeps it).
+  public string Send(OutboundMessage message, string idempotencyKey) {
+    var ours = message.From != "" ? new List<string>() : Addresses();
+    var from = message.From != "" ? message.From : (ours.Count > 0 ? ours[0] : "");
+    // A message IN a conversation answers it ("Re: …"); one that is not — a code to prove an address — keeps its subject,
+    // and so does the first mail of a conversation the desk starts (a side conversation): it answers nothing yet.
+    var inConversation = message.ConversationId != Guid.Empty;
+    var subject = message.Subject == "" ? "Your conversation with us"
+      : (!inConversation || message.StartsTheThread || message.Subject.StartsWith("Re: ") ? message.Subject : "Re: " + message.Subject);
+    if (inConversation && SubjectReference != "") { subject = WithReference(subject, message.ConversationId); }
+    List<MailAttachment> files = [];
+    foreach (var f in message.Files) {
+      files.Add(new MailAttachment { FileName = f.FileName, ContentType = f.ContentType, ContentId = f.ContentId, Content = f.Content });
+    }
+    var outgoing = new MailMessage {
+      From = from, To = [message.To], Subject = subject, Text = message.Text,
+      InReplyTo = message.InReplyTo, References = message.ThreadKeys, Attachments = files,
+    };
+    if (PlusAddressReplies && inConversation && from.Contains("@")) { outgoing.ReplyTo = [PlusAddressed(from, message.ConversationId)]; }
+    return SendMail(outgoing, idempotencyKey).MessageId;
+  }
+}
+
+/// The mailbox receiver that files each mail into its conversation — `app.Mail.Receiver = new MailIntoConversations();`.
+/// Override `Arrived` to act on what it filed (open a ticket on a new conversation, move one that was waiting).
+public class MailIntoConversations : IMailReceiver {
+  public void Received(MailMessage mail, MailReceipt receipt) {
+    var original = receipt.OriginalId == Guid.Empty ? null : FileAsset.FirstOrDefault(f => f.Id == receipt.OriginalId);
+    Arrived(ReceiveMail(mail, original), mail);
+  }
+  /// What the app does once a mail is in its conversation — nothing, unless overridden.
+  public virtual void Arrived(InboundResult result, MailMessage mail) { }
+}
+
+/// A received mail, into the conversation it belongs to — what the mailbox receiver calls for each message it accepts.
+/// What the sender just wrote is the message; what their client quoted under it is kept beside it (`SplitReply`), and
+/// so are its files and, when the receiver kept it, the whole original. An out-of-office or other automatic reply is
+/// recorded and never answered; a bounce marks the delivery it answers failed. Runs as the receiver (the system, in
+/// `ReceivedMailHandling`), or as an account the app's `IsConversationStaff` admits.
+public InboundResult ReceiveMail(MailMessage mail, FileAsset? original = null) {
+  var channel = ChannelFor("email") as MailConversationChannel;
+  var ours = channel == null ? new List<string>() : channel.Addresses().Select(e => e.Trim().ToLower()).ToList();
+  var from = AddressOf(mail.From);
+  List<string> addressed = [];
+  List<string> tokens = [];
+  foreach (var to in mail.To.Concat(mail.Cc)) {
+    // `support+c-<id>@acme.com` is `support@acme.com`, pointing at a conversation.
+    // Only OUR addresses are read this way — a customer's own plus address is theirs, spelled as they spell it.
+    var address = AddressOf(to);
+    if (!ours.Contains(WithoutPlus(address))) { addressed.Add(address); continue; }
+    var token = ConversationTokenIn(address);
+    if (token != null) { tokens.Add(token); }
+    addressed.Add(WithoutPlus(address));
+  }
+  var endpoint = addressed.FirstOrDefault(a => ours.Contains(a)) ?? (addressed.Count > 0 ? addressed[0] : "");
+
+  List<string> threadKeys = [];
+  if (mail.InReplyTo != "") { threadKeys.Add(mail.InReplyTo); }
+  foreach (var id in mail.References) { if (id != "" && !threadKeys.Contains(id)) { threadKeys.Add(id); } }
+  // A bounce names the mails it reports on in its own returned part — the receiver lifted them into
+  // `FailedMessageIds` — and those ids are ours, so they also say which conversation it is about.
+  foreach (var id in mail.FailedMessageIds) { if (id != "" && !threadKeys.Contains(id)) { threadKeys.Add(id); } }
+  // The plus address stands in for the thread ids a mail client dropped: it names the conversation, and one of that
+  // conversation's own ids is what the kit matches on — so its join check decides, exactly as for a quoted id.
+  foreach (var token in tokens) {
+    var conversationId = Guid.Parse(token);
+    var key = ConversationThreadKey.Where(k => k.Conversation.Id == conversationId && k.ChannelKey == "email")
+      .OrderBy(k => k.CreatedAt).Select(k => k.Key).FirstOrDefault();
+    if (key != null && !threadKeys.Contains(key)) { threadKeys.Add(key); }
+  }
+  // The LAST resort: a reference in the subject ("[#1419]"), the same way — it names a conversation, and one of that
+  // conversation's own ids is what the kit matches on, so its join check decides. A guessed reference admits nobody.
+  var reference = channel == null ? null : channel.ReferenceIn(mail.Subject);
+  if (reference != null) {
+    var referenced = Conversation.Where(c => c.Reference == reference).Select(c => c.Id).FirstOrDefault();
+    var key = ConversationThreadKey.Where(k => k.Conversation.Id == referenced && k.ChannelKey == "email")
+      .OrderBy(k => k.CreatedAt).Select(k => k.Key).FirstOrDefault();
+    if (key != null && !threadKeys.Contains(key)) { threadKeys.Add(key); }
+  }
+
+  // A BOUNCE answers a mail WE sent: mark that delivery failed, and record nothing else of it.
+  if (IsBounce(mail)) {
+    foreach (var id in threadKeys) {
+      DeliveryReport("email", id, DeliveryOutcome.Failed, $"The mail bounced: {mail.Subject}");
+    }
+  }
+
+  // What they wrote this time, apart from what their client quoted under it — structure first, words second; unsure
+  // shows everything. Nothing is dropped: the quoted part, the files and the original all stay with the message.
+  var split = SplitReply(mail.Text, mail.Html);
+  List<InboundFile> files = [];
+  foreach (var a in mail.Attachments) {
+    files.Add(new InboundFile { FileName = a.FileName, ContentType = a.ContentType, ContentId = a.ContentId,
+                                Inline = a.ContentId != "", Content = a.Content });
+  }
+  return ReceiveInbound(new InboundMessage {
+    ChannelKey = "email", Endpoint = endpoint, From = from, FromName = NameOf(mail.From),
+    AlsoTo = addressed.Where(a => a != from && !ours.Contains(a)).ToList(),
+    ExternalId = mail.MessageId, ThreadKeys = threadKeys, Subject = mail.Subject,
+    Text = split.New, QuotedText = split.Quoted, Files = files, Original = original,
+    IsAutomatic = IsAutomaticReply(mail) || IsBounce(mail),
+  });
+}
+
+/// An automatic reply — `Auto-Submitted` anything but `no` (RFC 3834), `Precedence: bulk/junk/list`, or the
+/// auto-responder headers mail systems set. Recorded, never answered: answering one is how two robots mail each other
+/// for ever.
+bool IsAutomaticReply(MailMessage mail) {
+  foreach (var header in mail.Headers) {
+    var n = header.Key.ToLower();
+    var v = header.Value.Trim().ToLower();
+    if (n == "auto-submitted" && v != "no") { return true; }
+    if (n == "precedence" && (v == "bulk" || v == "junk" || v == "list" || v == "auto_reply")) { return true; }
+    if (n == "x-autoreply" || n == "x-autorespond" || n == "x-auto-response-suppress") { return true; }
+  }
+  return false;
+}
+
+/// A delivery failure report — one the receiver read the failed ids out of (`FailedMessageIds`), or one from the mail
+/// system itself (`mailer-daemon`, `postmaster`) or carrying the failed
+/// recipients header.
+bool IsBounce(MailMessage mail) {
+  if (mail.FailedMessageIds.Count > 0) { return true; }
+  var from = AddressOf(mail.From);
+  if (from.StartsWith("mailer-daemon@") || from.StartsWith("postmaster@")) { return true; }
+  foreach (var header in mail.Headers) { if (header.Key.ToLower() == "x-failed-recipients") { return true; } }
+  return false;
+}
+
+/// "Ada Lovelace <ada@example.com>" → "ada@example.com"; a bare address, trimmed and lower-cased.
+string AddressOf(string mailbox) {
+  var open = mailbox.LastIndexOf("<");
+  var close = mailbox.LastIndexOf(">");
+  var address = open >= 0 && close > open ? mailbox.Substring(open + 1, close - open - 1) : mailbox;
+  return address.Trim().ToLower();
+}
+
+/// `support@acme.com` and a conversation → `support+c-<32 hex>@acme.com`.
+string PlusAddressed(string mailbox, Guid conversationId) {
+  var address = AddressOf(mailbox);
+  var at = address.IndexOf("@");
+  return address.Substring(0, at) + "+c-" + conversationId.ToString("N") + address.Substring(at);
+}
+
+/// The conversation token in a plus address (`support+c-<32 hex>@…`), or null — anything else after the `+` is not ours.
+string? ConversationTokenIn(string address) {
+  var plus = address.IndexOf("+c-");
+  var at = address.IndexOf("@");
+  if (plus < 0 || at < plus) { return null; }
+  var token = address.Substring(plus + 3, at - plus - 3);
+  if (token.Length != 32) { return null; }
+  for (var i = 0; i < token.Length; i++) {
+    if (!"0123456789abcdef".Contains(token.Substring(i, 1))) { return null; }
+  }
+  return token;
+}
+
+/// `support+anything@acme.com` → `support@acme.com`.
+string WithoutPlus(string address) {
+  var plus = address.IndexOf("+");
+  var at = address.IndexOf("@");
+  return plus > 0 && at > plus ? address.Substring(0, plus) + address.Substring(at) : address;
+}
+
+/// "Ada Lovelace <ada@example.com>" → "Ada Lovelace"; "" when only an address was given.
+string NameOf(string mailbox) {
+  var open = mailbox.LastIndexOf("<");
+  if (open <= 0) { return ""; }
+  return mailbox.Substring(0, open).Replace("\"", "").Trim();
+}
+
+/// An HTML body as plain text — tags dropped, the common entities read — for a mail that came with no text part.
+string PlainOf(string html) {
+  var text = "";
+  var inTag = false;
+  for (var i = 0; i < html.Length; i++) {
+    var c = html.Substring(i, 1);
+    if (c == "<") { inTag = true; continue; }
+    if (c == ">") { inTag = false; continue; }
+    if (!inTag) { text = text + c; }
+  }
+  return text.Replace("&nbsp;", " ").Replace("&amp;", "&").Replace("&lt;", "<").Replace("&gt;", ">").Replace("&quot;", "\"").Trim();
+}

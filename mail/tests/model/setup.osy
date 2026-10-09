@@ -1,0 +1,17 @@
+// The desk's setup. In a file of its own with no `namespace`: an `app.X = …` value is resolved outside the file's
+// namespace, so the `using`s below are what let it name the desk's own classes.
+using Osysharp.Mail;
+using Osysharp.Conversations;
+using Osysharp.Conversations.Mail;
+using ConversationsMailTests;
+
+app.Mail = new MailSetup {
+  Sender = new RecordingSender(), From = "Desk <support@desk.test>",
+  // support@ is WATCHED (a fake provider the tests fill); what it receives is filed into its conversation.
+  Mailboxes = [new FakeMailbox { Address = "watched@desk.test" }],
+  Receiver = new MailIntoConversations(),
+};
+app.Conversations = new ConversationsSetup {
+  Channels = [new MailConversationChannel { Endpoints = ["support@desk.test", "billing@desk.test", "watched@desk.test"],
+                                            PlusAddressReplies = true, SubjectReference = "[#{reference}]" }],
+};

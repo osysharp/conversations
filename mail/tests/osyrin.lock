@@ -1,0 +1,148 @@
+{
+  "platform": {
+    "version": "0.9.0"
+  },
+  "entries": [
+    {
+      "name": "Osysharp.Collaboration",
+      "kind": "package",
+      "version": "0.1.0",
+      "hash": "sha256:130e15ac3f30d05a91b64f314d75c8c0d5db54b906df828138b36bf0e0854e39",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/collaboration",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Identity",
+      "kind": "package",
+      "version": "0.7.0",
+      "hash": "sha256:a8f780ee024fb27a6c1f909feb86fec10c8a176788acd8546d1380a9243575bd",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/identity",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Observability",
+      "kind": "package",
+      "version": "1.0.0",
+      "hash": "sha256:aba8df0c3a7c56cfa752ad731283a5559ba21e6b04909ce580778518fe2f7196",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Observability"
+    },
+    {
+      "name": "Osysharp.Ui",
+      "kind": "package",
+      "version": "2.18.0",
+      "hash": "sha256:deccf5a06701c6af9cd880108de9426376c878130251be73adf1210cce94605b",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Ui"
+    },
+    {
+      "name": "Osysharp.Conversations",
+      "kind": "package",
+      "version": "0.24.1",
+      "hash": "sha256:966b3dcf0472f852fbb5cb4fbb937937cb5c74f44eb449866d28432b469bc608",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/conversations",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Workflow",
+      "kind": "package",
+      "version": "1.0.0",
+      "hash": "sha256:c9b5bb60a8be44efc0030d73b0bd60bdab05926344a68fb4db29dc78ee94c2f8",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Workflow"
+    },
+    {
+      "name": "Osysharp.Memory",
+      "kind": "package",
+      "version": "1.0.0",
+      "hash": "sha256:51d3b9a3921ce28952245f6fff3fcb9d4c12dee368cb1b9eedc57c5de2e4825f",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Memory"
+    },
+    {
+      "name": "Osysharp.Storage",
+      "kind": "package",
+      "version": "1.2.0",
+      "hash": "sha256:0e45268f33acd5a0fe1dae3e886ab1d828824fc628f9a34efa81af746b0f57d0",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Storage"
+    },
+    {
+      "name": "Osysharp.Mail",
+      "kind": "package",
+      "version": "0.9.0",
+      "hash": "sha256:9d881411b8948aae3c06adeb2ebe9cd828d198e07bef0d5c002c83206ca6e013",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/mail",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Mail.Receiving",
+      "kind": "package",
+      "version": "0.4.1",
+      "hash": "sha256:5ae187bb43a3b31f0c505e999397d7bd4d1b359c63f95c397d1b7045b2795ca2",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/mail-receiving",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Oauth",
+      "kind": "package",
+      "version": "1.0.0",
+      "hash": "sha256:fd5563824db859a8f313637ed6a74f7bcf232b1c18df6f60ea6fd0cd2cad8f1c",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Oauth"
+    },
+    {
+      "name": "Osysharp.Conversations.Mail",
+      "kind": "package",
+      "version": "0.4.0",
+      "hash": "sha256:20672e3e1078eeaf54fe0078f54384eef9c0ec3234225fbd08ae77b102a3264e",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/conversations-mail",
+      "included": "completes Osysharp.Conversations \u002B Osysharp.Mail.Receiving"
+    }
+  ],
+  "bridges": {
+    "searched": [
+      "workspace",
+      "platform"
+    ],
+    "skipped": [
+      "github: offline \u2014 the public catalog was not searched for bridges. Run \u0060osy lock\u0060 with a network to look."
+    ],
+    "notIncluded": [
+      {
+        "name": "Osysharp.Conversations.MachineTranslation",
+        "reason": "completes Osysharp.Conversations \u002B Osysharp.MachineTranslation, and this app does not use \u0060Osysharp.MachineTranslation\u0060."
+      },
+      {
+        "name": "Osysharp.Conversations.Sms",
+        "reason": "completes Osysharp.Conversations \u002B Osysharp.Sms, and this app does not use \u0060Osysharp.Sms\u0060."
+      },
+      {
+        "name": "Osysharp.Privacy.Conversations",
+        "reason": "completes Osysharp.Privacy \u002B Osysharp.Conversations, and this app does not use \u0060Osysharp.Privacy\u0060."
+      },
+      {
+        "name": "Osysharp.Privacy.MailReceiving",
+        "reason": "completes Osysharp.Privacy \u002B Osysharp.Mail.Receiving, and this app does not use \u0060Osysharp.Privacy\u0060."
+      }
+    ]
+  }
+}

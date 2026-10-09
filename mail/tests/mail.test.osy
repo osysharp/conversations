@@ -1,0 +1,330 @@
+// Osysharp.Conversations.Mail — email as a conversation channel. Every test asserts what the CARRIER was handed
+// (`Carried`, written by the desk's recording mail sender) or what the conversation now holds.
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Conversations;
+using Osysharp.Conversations.Mail;
+using ConversationsMailTests;
+
+/// The desk: Ada answers; Inbox is the account the mailbox receiver runs as.
+[TestFixture]
+void Desk() {
+  var ada = new Person { Email = "ada@desk.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  var inbox = new Person { Email = "inbox@desk.test", DisplayName = "Inbox" };
+  new RoleGrant { Member = inbox, Role = AppRole.Integration };
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@desk.test");
+principal Inbox => Person.Single(p => p.Email == "inbox@desk.test");
+
+/// A mail as the mailbox receiver hands it over.
+MailMessage Received(string from, string id, string text, string to = "support@desk.test", string subject = "Invoice") {
+  return new MailMessage { From = from, To = [to], Subject = subject, Text = text, MessageId = id };
+}
+
+/// Run everything queued: the conversation's deliveries, then the mail outbox they wrote to.
+void DeliverAll() {
+  foreach (var d in MessageDelivery.ToList()) { Workflow.Settle(d); }
+  foreach (var m in OutgoingMail.ToList()) { Workflow.Settle(m); }
+}
+
+[Test(Desk)]
+void a_mail_received_becomes_a_message_from_whoever_wrote_it() {
+  runas (Inbox) {
+    var mail = Received("Ana Lima <Ana@Example.test>", "<m1@example.test>", "", "billing@desk.test");
+    mail.Text = null;
+    mail.Html = "<p>My invoice is <b>wrong</b> &amp; late.</p>";
+    mail.Cc = ["Boss <boss@example.test>", "support@desk.test"];
+    var r = ReceiveMail(mail);
+    UnitOfWork.Commit();
+    Assert.True(r.Started);
+  }
+  runas (Ada) {
+    var c = Conversation.Single();
+    Assert.Equal("Invoice", c.Subject);
+    Assert.Equal("email", c.ReplyChannel);
+    // The address it came TO is the one we answer from.
+    Assert.Equal("billing@desk.test", c.ReplyEndpoint);
+    var m = Message.Single();
+    Assert.Equal("My invoice is wrong & late.", m.Text);
+    Assert.Equal("Ana Lima", m.ByName);
+    // Everyone else it was written to — not the sender, not our own addresses.
+    Assert.Equal("boss@example.test", m.AlsoTo);
+    Assert.Equal(1, ContactPoint.Count(p => p.Value == "ana@example.test"));
+  }
+}
+
+[Test(Desk)]
+void a_reply_goes_from_the_address_it_came_to_and_threads_in_the_customers_mail() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.", "billing@desk.test")); UnitOfWork.Commit(); }
+  runas (Ada) {
+    Post(Conversation.Single(), "Corrected — a new invoice is on its way.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    var sent = Carried.Single();
+    Assert.Equal("billing@desk.test", sent.From);
+    Assert.Equal("ana@example.test", sent.To);
+    Assert.Equal("Re: Invoice", sent.Subject);
+    Assert.Equal("Corrected — a new invoice is on its way.", sent.Text);
+    Assert.Equal("<m1@example.test>", sent.InReplyTo);
+    Assert.Contains("<m1@example.test>", sent.References);
+    var delivery = MessageDelivery.Single();
+    Assert.Equal(DeliveryState.Sent, delivery.State);
+    // The delivery's id IS the Message-ID the carrier sent — what the customer's answer will quote.
+    Assert.Equal(sent.MessageId, delivery.ExternalId);
+  }
+}
+
+[Test(Desk)]
+void the_customers_answer_to_our_reply_continues_the_same_conversation() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.")); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(), "Corrected."); UnitOfWork.Commit(); DeliverAll(); }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single().MessageId; }
+  runas (Inbox) {
+    var answer = Received("ana@example.test", "<m2@example.test>", "Thanks!", "support@desk.test", "Re: Invoice");
+    answer.InReplyTo = ours;
+    answer.References = ["<m1@example.test>", ours];
+    var r = ReceiveMail(answer);
+    UnitOfWork.Commit();
+    Assert.True(!r.Started);
+  }
+  runas (Ada) {
+    Assert.Equal(1, Conversation.Count());
+    Assert.Equal(3, Message.Count());
+  }
+}
+
+[Test(Desk)]
+void an_out_of_office_is_recorded_and_never_answered() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.")); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(), "Corrected."); UnitOfWork.Commit(); DeliverAll(); }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single().MessageId; }
+  runas (Inbox) {
+    var away = Received("ana@example.test", "<ooo@example.test>", "I am away until Monday.", "support@desk.test", "Auto: Re: Invoice");
+    away.InReplyTo = ours;
+    away.Headers["Auto-Submitted"] = "auto-replied";
+    var r = ReceiveMail(away);
+    UnitOfWork.Commit();
+    Assert.True(r.Automatic);
+  }
+  runas (Ada) {
+    Assert.Equal(0, Message.Count(m => m.Text == "I am away until Monday."));
+    Assert.Equal(1, ConversationEvent.Count(e => e.Kind == "conversations.auto-reply"));
+    // Nothing was sent in answer to it.
+    Assert.Equal(1, Carried.Count());
+  }
+}
+
+[Test(Desk)]
+void a_mail_that_says_auto_submitted_no_is_a_person_writing() {
+  runas (Inbox) {
+    var mail = Received("ana@example.test", "<m1@example.test>", "Written by me.");
+    mail.Headers["Auto-Submitted"] = "no";
+    var r = ReceiveMail(mail);
+    UnitOfWork.Commit();
+    Assert.True(!r.Automatic);
+  }
+  runas (Ada) { Assert.Equal(1, Message.Count()); }
+}
+
+[Test(Desk)]
+void a_bounce_marks_the_delivery_failed_and_lists_nobody_new() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.")); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(), "Corrected."); UnitOfWork.Commit(); DeliverAll(); }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single().MessageId; }
+  runas (Inbox) {
+    var bounce = Received("Mail Delivery System <MAILER-DAEMON@mx.example.test>", "<dsn1@mx.example.test>",
+                          "The address ana@example.test does not exist.", "support@desk.test", "Undelivered Mail Returned to Sender");
+    bounce.References = [ours];
+    var r = ReceiveMail(bounce);
+    UnitOfWork.Commit();
+    Assert.True(r.Automatic);
+  }
+  runas (Ada) {
+    var delivery = MessageDelivery.Single();
+    Assert.Equal(DeliveryOutcome.Failed, delivery.Outcome);
+    Assert.StartsWith("The mail bounced", delivery.Problem!);
+    Assert.Equal(0, ContactPoint.Count(p => p.Value == "mailer-daemon@mx.example.test"));
+    Assert.Equal(1, Message.Count(m => m.Direction == MessageDirection.Inbound));
+  }
+}
+
+[Test(Desk)]
+void with_no_mail_sender_ready_the_reply_is_held_and_says_why() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.")); UnitOfWork.Commit(); }
+  runas (Ada) {
+    new SenderState { Unconfigured = true };
+    UnitOfWork.Commit();
+    Post(Conversation.Single(), "Corrected.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    var delivery = MessageDelivery.Single();
+    Assert.Equal(DeliveryState.Held, delivery.State);
+    // The mail sender's own words — the desk reads what to fix.
+    Assert.Equal("The recording sender has no API key.", delivery.Problem);
+    Assert.Equal(0, OutgoingMail.Count());
+    Assert.Equal(0, Carried.Count());
+  }
+}
+
+[Test(Desk)]
+void a_reply_names_its_conversation_in_a_plus_addressed_reply_to() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.", "billing@desk.test")); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(), "Corrected."); UnitOfWork.Commit(); DeliverAll(); }
+  runas (Ada) {
+    var id = Conversation.Single().Id.ToString("N");
+    Assert.Equal($"billing+c-{id}@desk.test", Carried.Single().ReplyTo);
+  }
+}
+
+[Test(Desk)]
+void an_answer_that_dropped_every_thread_id_finds_its_conversation_by_the_plus_address() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.", "billing@desk.test")); UnitOfWork.Commit(); }
+  var replyTo = "";
+  runas (Ada) { Post(Conversation.Single(), "Corrected."); UnitOfWork.Commit(); DeliverAll(); }
+  runas (Ada) { replyTo = Carried.Single().ReplyTo; }
+  runas (Inbox) {
+    // No In-Reply-To, no References — only the address it was sent to.
+    var r = ReceiveMail(Received("ana@example.test", "<m2@example.test>", "Thanks!", replyTo, "Re: Invoice"));
+    UnitOfWork.Commit();
+    Assert.True(!r.Started);
+  }
+  runas (Ada) {
+    Assert.Equal(1, Conversation.Count());
+    Assert.Equal(2, Message.Count(m => m.Direction == MessageDirection.Inbound));
+    // Read as the endpoint it is — our billing address, not a new one.
+    Assert.Equal("billing@desk.test", Conversation.Single().ReplyEndpoint);
+  }
+}
+
+[Test(Desk)]
+void a_stranger_writing_to_the_plus_address_starts_a_conversation_of_their_own() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.", "billing@desk.test")); UnitOfWork.Commit(); }
+  var replyTo = "";
+  runas (Ada) { Post(Conversation.Single(), "Corrected."); UnitOfWork.Commit(); DeliverAll(); }
+  runas (Ada) { replyTo = Carried.Single().ReplyTo; }
+  // The address only POINTS — whoever writes to it must be in the thread to continue it.
+  runas (Inbox) {
+    var r = ReceiveMail(Received("mallory@example.test", "<x1@example.test>", "Send me her invoice.", replyTo, "Re: Invoice"));
+    UnitOfWork.Commit();
+    Assert.True(r.Started);
+  }
+  runas (Ada) {
+    Assert.Equal(2, Conversation.Count());
+    var hers = Message.Single(m => m.Text == "Wrong total.").Conversation;
+    Assert.Equal(0, Message.Count(m => m.Conversation == hers && m.Text == "Send me her invoice."));
+  }
+}
+
+[Test(Desk)]
+void a_chat_reply_left_unread_is_mailed_from_the_desk_and_the_answer_lands_in_the_chat() {
+  // Ana asks in the chat, leaving her address, and leaves.
+  Conversation? c = null;
+  runas (new Visitor { Id = "visit-ana" }) { c = StartConversation("Do you ship to Norway?", "Shipping", "Ana", "ana@example.test"); }
+  runas (Ada) {
+    Post(Conversation.Single(), "Yes — to every Nordic country.");
+    UnitOfWork.Commit();
+  }
+  // Ten minutes on, the follow-up goes through the mail outbox — from the desk's first address (a chat arrived at no
+  // address), with the unread reply and the continue link.
+  TestClock.Advance(TimeSpan.FromMinutes(11));
+  runas (Ada) {
+    foreach (var seat in Participant.Where(p => p.Party != null).ToList()) { Workflow.Settle(seat); }
+    DeliverAll();
+  }
+  var id = "";
+  runas (Ada) {
+    var mail = Carried.Single();
+    Assert.Equal("support@desk.test", mail.From);
+    Assert.Equal("ana@example.test", mail.To);
+    Assert.Equal("Re: Shipping", mail.Subject);
+    Assert.Contains("Yes — to every Nordic country.", mail.Text);
+    Assert.Contains("/conversations/continue/g1.", mail.Text);
+    id = mail.MessageId;
+  }
+  // She answers from her mail app — and the answer is in the chat she started.
+  runas (Inbox) {
+    var answer = Received("Ana <ana@example.test>", "<ana-1@example.test>", "Great — and to Tromsø?", "support@desk.test", "Re: Shipping");
+    answer.InReplyTo = id;
+    var r = ReceiveMail(answer);
+    UnitOfWork.Commit();
+    Assert.True(!r.Started);
+  }
+  runas (new Visitor { Id = "visit-ana" }) {
+    var said = Message.Where(m => m.Conversation.Id == c!.Id).OrderBy(m => m.Sequence).ToList();
+    Assert.Equal(3, said.Count);
+    Assert.Equal("email", said[2].ChannelKey);
+    Assert.Equal("Great — and to Tromsø?", said[2].Text);
+  }
+}
+
+[Test(Desk)]
+void a_bounce_naming_our_mail_only_in_its_returned_part_still_fails_that_delivery() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.")); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(), "Corrected."); UnitOfWork.Commit(); DeliverAll(); }
+  var ours = "";
+  runas (Ada) { ours = Carried.Single().MessageId; }
+  runas (Inbox) {
+    // A DSN from a relay that threads nothing: no In-Reply-To, no References — the failed mail's id is only in the
+    // returned message, which the receiver read out for us.
+    var bounce = Received("Mail Delivery Subsystem <postmaster@relay.example.test>", "<dsn2@relay.example.test>",
+                          "Delivery to the following recipient failed permanently.", "support@desk.test", "Delivery Status Notification (Failure)");
+    bounce.FailedMessageIds = [ours];
+    var r = ReceiveMail(bounce);
+    UnitOfWork.Commit();
+    Assert.True(r.Automatic);
+  }
+  runas (Ada) {
+    Assert.Equal(DeliveryOutcome.Failed, MessageDelivery.Single().Outcome);
+    // …and it is recorded on the conversation it was about, not answered and not a conversation of its own.
+    Assert.Equal(1, Conversation.Count());
+    Assert.Equal(1, ConversationEvent.Count(e => e.Kind == "conversations.auto-reply"));
+  }
+}
+
+[Test(Desk)]
+void erasing_a_customer_erases_the_mail_the_desk_sent_them() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.")); UnitOfWork.Commit(); }
+  runas (Ada) { Post(Conversation.Single(), "Corrected — the new invoice is attached."); UnitOfWork.Commit(); DeliverAll(); }
+  runas (Ada) {
+    Assert.Equal(1, OutgoingMail.Count(m => m.To == "ana@example.test"));
+    // What a privacy request's erasure of her contact points asks of this channel (Osysharp.Privacy.Conversations).
+    new CopyErasure { Address = "ana@example.test" };
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    // The outbox forgot it — the copy the Mail kit keeps is in the register too.
+    Assert.Equal(0, OutgoingMail.Count(m => m.To == "ana@example.test"));
+  }
+}
+
+
+/// A conversation the DESK starts — a side conversation to a supplier — answers nothing yet, so its first mail keeps its
+/// subject; an ordinary reply to somebody who wrote in is "Re: …" as ever.
+[Test(Desk)]
+void the_first_mail_of_a_conversation_the_desk_starts_is_not_dressed_as_an_answer() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "The pallet arrived crushed.")); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var carrier = new Osysharp.Conversations.Party { DisplayName = "Northline" };
+    new ContactPoint { Party = carrier, Kind = ContactPointKind.Email, Value = "orders@carrier.test", IsPreferred = true };
+    UnitOfWork.Commit();
+    var ana = Conversation.Single();
+    StartSideConversation(ana, "Monday's delivery", "Can you check Monday's delivery?", carrier);
+    Post(ana, "We are asking the carrier.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    Assert.Equal("Monday's delivery", Carried.Single(x => x.To == "orders@carrier.test").Subject);
+    Assert.Equal("Re: Invoice", Carried.Single(x => x.To == "ana@example.test").Subject);
+  }
+}
