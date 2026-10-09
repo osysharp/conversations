@@ -12,7 +12,7 @@ using ConversationsSmsTests;
 void Desk() {
   var ada = new Person { Email = "ada@desk.test", DisplayName = "Ada" };
   new RoleGrant { Member = ada, Role = AppRole.Agent };
-  var hook = new Person { Email = "hook@desk.test", DisplayName = "Hook" };
+  var hook = new Person { Email = "hook@desk.test", DisplayName = "Carrier" };
   new RoleGrant { Member = hook, Role = AppRole.Integration };
 }
 

@@ -18,7 +18,7 @@
 //   `ReceiveSms`, and its delivery report to `SmsDeliveryReport`. Until the platform's signed-webhook receivers land
 //   (D-RECEIVE1), those are the entry points an app's own endpoint — or a test — calls.
 package Osysharp.Conversations.Sms {
-  version     "0.1.0";
+  version     "0.1.1";
   minPlatform "0.9.0";
   summary     "text messages as a channel for Osysharp.Conversations — replies through Osysharp.Sms's outbox from the app's own number, a text received continues that number's latest conversation within a window, carrier delivery reports, and a refusal of an alphanumeric sender that could never be answered.";
   completes   Osysharp.Conversations@0, Osysharp.Sms@0;
