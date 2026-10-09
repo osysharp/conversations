@@ -10,10 +10,11 @@
 //   conversations stay usable without mail (a chat-only desk). An app that wants both names this channel:
 //     app.Conversations = new ConversationsSetup { Channels = [new MailConversationChannel { Endpoints = ["support@acme.com"] }] };
 //
-// ⚠ RECEIVING: the monitored-mailbox receiver (Gmail / Microsoft 365 over OAuth, IMAP — D-RECEIVE1 stage 1b) hands each
-//   mail to `ReceiveMail`. Until it lands, `ReceiveMail` is the entry point a test (or an app's own webhook) calls.
+// ⚑ RECEIVING: `Osysharp.Mail.Receiving` watches the app's mailboxes (Gmail / Microsoft 365 over OAuth, IMAP), and
+//   `app.Mail.Receiver = new MailIntoConversations();` files each mail it accepts through `ReceiveMail` — the same entry
+//   point a test, or an app's own webhook, calls directly.
 package Osysharp.Conversations.Mail {
-  version     "0.4.1";
+  version "0.4.2";
   minPlatform "0.9.0";
   summary     "email as a channel for Osysharp.Conversations — replies through Osysharp.Mail's outbox, from the address the customer wrote to and threaded; a mail received continues its conversation; out-of-office replies and bounces recognised.";
   completes   Osysharp.Conversations@0, Osysharp.Mail.Receiving@0;

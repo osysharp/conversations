@@ -60,9 +60,10 @@ exactly as for a quoted Message-ID — anyone else starts a conversation of thei
 ## Receiving
 
 `ReceiveMail(MailMessage)` is the one entry point: it takes a mail as the mailbox receiver hands it over and answers
-what `ReceiveInbound` did. The connected-mailbox receiver (Gmail and Microsoft 365 over OAuth, IMAP) calls it for each
-message; until that ships, an app's own webhook can. It runs as the receiver's account, which the app's
-`IsConversationStaff` must admit.
+what `ReceiveInbound` did. [Osysharp.Mail.Receiving](https://osyrin.com/templates/kits/mail-receiving/) watches the
+app's mailboxes (Gmail and Microsoft 365 over OAuth, IMAP), and `app.Mail.Receiver = new MailIntoConversations();` files
+each message it accepts through it; an app's own webhook can call it too. Called directly, it runs as the caller's
+account, which the app's `IsConversationStaff` must admit.
 
 What it reads:
 
