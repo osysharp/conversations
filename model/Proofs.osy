@@ -31,6 +31,8 @@ public enum ProofState {
 /// A code sent to a contact point, so whoever reads it there can prove the point is theirs.
 [Authority(Extensible)]
 public entity PointCheck {
+  [CreatedAt] DateTime? CreatedAt;
+  [ModifiedAt] DateTime? ModifiedAt;
   [Required] ContactPoint Point;
   /// The browser that asked — its own visit, stamped when the row is made.
   [MaxLength(64)] string? Visit = Visitor.Id;

@@ -36,6 +36,7 @@ public enum AttachmentKind {
 /// A file a message carries.
 [Authority(Extensible)]
 public entity MessageAttachment {
+  [CreatedAt] DateTime? CreatedAt;
   [Required] Message Message;
   /// The file. An ATTACHMENT of this row: readable by exactly whoever may read this row, and so the message.
   [Required, Attachment] FileAsset File;

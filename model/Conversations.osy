@@ -67,6 +67,7 @@ policy IsCustomerIn(Guid conversation) =>
 ///   IsConversationStaff; } }`), so it is `Extensible`; this block grants the customer side, which the kit can state.
 [Authority(Extensible)]
 public entity Conversation {
+  [CreatedBy] Guid? CreatedBy;
   [Classification(Personal.Content), MaxLength(300)] string? Subject;
   [Required] DateTime StartedAt;
   DateTime? LastEntryAt;

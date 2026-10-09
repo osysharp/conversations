@@ -163,6 +163,7 @@ public enum LanguageWorkState {
 [Unique(Message)]
 [Authority(Extensible)]
 public entity MessageLanguageWork {
+  [CreatedAt] DateTime? CreatedAt;
   [Required] Message Message;
   LanguageWorkState State;                              // no default — MessageLanguage owns it
   int Attempts;

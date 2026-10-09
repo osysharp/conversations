@@ -133,6 +133,7 @@ public enum DeliveryOutcome {
 /// out on several (shown in the widget AND mailed as the "you have unread replies" follow-up).
 [Authority(Extensible)]
 public entity MessageDelivery {
+  [CreatedAt] DateTime? CreatedAt;
   [Required] Message Message;
   [Required, MaxLength(40)] string ChannelKey;
   /// The contact point it goes to.
@@ -167,6 +168,7 @@ public entity MessageDelivery {
 [Unique(ChannelKey, Key)]
 [Authority(Extensible)]
 public entity ConversationThreadKey {
+  [CreatedAt] DateTime? CreatedAt;
   [Required] Conversation Conversation;
   [Required, MaxLength(40)] string ChannelKey;
   [Required, MaxLength(255)] string Key;

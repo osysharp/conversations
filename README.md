@@ -33,11 +33,11 @@ partial entity MessageAttachment { security { allow read, create when IsConversa
 // (and Participant, ConversationEntry, ConversationEvent, MessageText, ContactPoint, Party)
 
 // The customer's chat, signed out or in.
-[Page("/chat")] [AllowAnonymous] [Render(CSR)]
+[Route("/chat")] [AllowAnonymous] [Render(CSR)]
 component ChatPage() { render { ConversationWidget(); } }
 
 // A conversation as an agent works it.
-[Page("/desk/{id}")] [Authorize(IsConversationStaff)] [Render(CSR)]
+[Route("/desk/{id}")] [Authorize(IsConversationStaff)] [Render(CSR)]
 component DeskPage(Guid id) {
   render { ConversationPresenceChip(id, desk: true); ConversationTranscript(id, desk: true); ConversationComposer(id, desk: true); }
 }

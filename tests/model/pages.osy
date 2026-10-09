@@ -6,7 +6,7 @@ using Osysharp.Ui;
 using Osysharp.Conversations;
 
 /// The front door — a visitor with no address to type lands here, and is one click from the chat.
-[Page("/")]
+[Route("/")]
 [AllowAnonymous]
 component DeskHome() {
   render {
@@ -17,7 +17,7 @@ component DeskHome() {
   }
 }
 
-[Page("/chat")]
+[Route("/chat")]
 [AllowAnonymous]
 [Render(CSR)]
 component ChatPage() {
@@ -34,7 +34,7 @@ component ChatPage() {
 
 /// A page of the shop with the chat in its corner — and, above the first message, the shop's own help (the widget's
 /// `help` slot): what an app with a knowledge base puts there.
-[Page("/shop")]
+[Route("/shop")]
 [AllowAnonymous]
 [Render(CSR)]
 component ShopPageWithChat() {
@@ -49,7 +49,7 @@ component ShopPageWithChat() {
   }
 }
 
-[Page("/desk/{conversationId}")]
+[Route("/desk/{conversationId}")]
 [Authorize(IsConversationStaff)]
 [Render(CSR)]
 component DeskConversationPage(Guid conversationId) {
@@ -67,7 +67,7 @@ component DeskConversationPage(Guid conversationId) {
 }
 
 /// The same conversation as a desk THREAD — full-width messages, the shape a helpdesk works in.
-[Page("/desk/{conversationId}/thread")]
+[Route("/desk/{conversationId}/thread")]
 [Authorize(IsConversationStaff)]
 [Render(CSR)]
 component DeskThreadPage(Guid conversationId) {
@@ -83,7 +83,7 @@ component DeskThreadPage(Guid conversationId) {
 
 /// A customer's own conversation as a thread — what a portal shows the person it is with: their messages, the replies,
 /// never a note or a draft.
-[Page("/my/{conversationId}")]
+[Route("/my/{conversationId}")]
 [Authorize]
 [Render(CSR)]
 component CustomerThreadPage(Guid conversationId) {
@@ -96,7 +96,7 @@ component CustomerThreadPage(Guid conversationId) {
   }
 }
 
-[Page("/desk/party/{partyId}")]
+[Route("/desk/party/{partyId}")]
 [Authorize(IsConversationStaff)]
 [Render(CSR)]
 component DeskPartyPage(Guid partyId) {

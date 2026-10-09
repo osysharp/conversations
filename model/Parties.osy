@@ -101,6 +101,7 @@ public entity Party {
 [Unique(Party, Kind, Value)]
 [Authority(Extensible)]
 public entity ContactPoint {
+  [CreatedAt] DateTime? CreatedAt;
   [Required] Party Party;
   [Required] ContactPointKind Kind;
   /// Normalised: an address trimmed and lower-cased, a phone in E.164, a visitor the platform's `Visitor.Id`, a

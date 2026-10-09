@@ -54,12 +54,12 @@ public component ConversationContinue(ConversationContinueLink link) {
   }
 }
 
-[Page("/conversations/continue/{link}")] [Title("Continue the conversation")] [AllowAnonymous] [Render(CSR)]
+[Route("/conversations/continue/{link}")] [Title("Continue the conversation")] [AllowAnonymous] [Render(CSR)]
 public component ConversationContinuePage(ConversationContinueLink link) {
   render { ConversationFrame() { Card() { ConversationContinue(link); } } }
 }
 
-[Page("/conversations/chat")] [Title("Your conversation")] [AllowAnonymous] [Render(CSR)]
+[Route("/conversations/chat")] [Title("Your conversation")] [AllowAnonymous] [Render(CSR)]
 public component ConversationChatPage() {
   render { ConversationFrame() { ConversationWidget(); } }
 }
