@@ -153,7 +153,7 @@ public entity Participant {
   FollowUpState FollowUp = FollowUpState.None;
   /// When this seat's follow-up run was started (`WebFollowUp`): the first chat reply that waited on it. Null while none
   /// has — and then the seat has no run at all, so a staff seat, and a customer nobody has answered in the chat, cost
-  /// nothing (SP-73). The kit's alone.
+  /// nothing. The kit's alone.
   DateTime? FollowUpStartedAt;
 
   invariant (Party != null ? 1 : 0) + (Member != null ? 1 : 0) + (AgentName != null ? 1 : 0) == 1

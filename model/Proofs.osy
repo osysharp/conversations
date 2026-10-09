@@ -17,7 +17,7 @@ using Osysharp.Workflow;
 // ⚑ THE CODE IS THE WORKFLOW'S. It is made, fingerprinted and sent by `AddressProof` after the commit that asked for it,
 //   and compared there: the row a browser makes holds no code, and nobody — staff included — reads the fingerprint.
 //   Fifteen minutes, five tries, a newer check spends the older: the shape of `Osysharp.Accounts`' one-time codes
-//   (D-SIGNUPPROOF1), for a party rather than an account.
+//   applied to a party rather than an account.
 
 // ⚠ Appended, never inserted: an enum is stored by position.
 public enum ProofState {

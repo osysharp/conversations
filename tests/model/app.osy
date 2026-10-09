@@ -23,7 +23,7 @@ entity Person : Principal {
   }
 }
 
-/// The desk's own kind of party — the SAME short name as the kit's base, on purpose: the namespace proof (D-CONVERSATIONS1 §0).
+/// The desk's own kind of party — the SAME short name as the kit's base, on purpose: it proves the two names live apart in their namespaces.
 entity Party : Osysharp.Conversations.Party {
   [MaxLength(20)] string Tier = "standard";
   security {

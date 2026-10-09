@@ -156,7 +156,7 @@ public entity Message : ConversationEntry {
 /// Something that HAPPENED on the conversation — an assignment, a status change, an SLA breach, an approval. Written by
 /// other kits and the app through `Record`, or as a kind of their own derived from this when it needs typed columns.
 ///
-/// ⚑ IT HOLDS THE FACTS, NEVER THE SENTENCE (D-RTL2 Q2). What happened — its `Kind` and the facts below, as they were at
+/// ⚑ IT HOLDS THE FACTS, NEVER THE SENTENCE. What happened — its `Kind` and the facts below, as they were at
 ///   the time — is stored; the words are said when it is READ, in the reader's language, by `ConversationCopy
 ///   .EventSentence`. So an Arabic desk reads its history in Arabic and a Swedish one in Swedish, from the same row. A
 ///   kind with facts of its own keeps them in `Facts` as its own class (`JsonSerializer.Serialize(new TicketFacts {…})`)

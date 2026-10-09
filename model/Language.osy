@@ -115,7 +115,7 @@ bool SameLanguage(string? a, string? b) {
 ///   language work after the commit asks the model, as before. The PARTY's language is still learnt there, by the app —
 ///   the writer (a signed-out visitor, say) may not change the party row.
 ///
-/// ⚑ NO WORK WHILE THE TRANSLATOR IS NOT READY (SP-73). Work queued for a translator that cannot run did nothing but end
+/// ⚑ NO WORK WHILE THE TRANSLATOR IS NOT READY. Work queued for a translator that cannot run did nothing but end
 ///   itself as "not translated" — a run per message, 9 statements each. Such a message has no work; the desk is told it
 ///   was not translated all the same (`ShownFor`, `LanguageStatusOf`), and `TranslateConversationAgain` queues it once
 ///   the translator is back.

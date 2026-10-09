@@ -72,7 +72,7 @@ void an_unread_chat_reply_is_mailed_after_ten_minutes_with_everything_unread() {
   runas (Ada) { Assert.Equal(1, Carried.Count()); }
 }
 
-/// Only a seat a chat reply waits on has a follow-up run (SP-73): the customer's, from the first reply. The desk's own
+/// Only a seat a chat reply waits on has a follow-up run: the customer's, from the first reply. The desk's own
 /// seat never does, and before anybody answers neither does hers.
 [Test(Desk)]
 void only_the_seat_a_reply_waits_on_starts_a_follow_up() {

@@ -3,7 +3,7 @@ namespace Osysharp.Conversations;
 using Osysharp.Identity;
 using Osysharp.Storage;
 
-// ATTACHMENTS (0.8.0, slice 7) — a screenshot of something that looks wrong, the source file a bug is in, the log, a
+// ATTACHMENTS (0.8.0) — a screenshot of something that looks wrong, the source file a bug is in, the log, a
 // mail's PDF. A file rides on a MESSAGE and is readable exactly where that message is: the file is an `[Attachment]` of
 // its `MessageAttachment` row, whose rules are the message's — so a customer reads the screenshot on a reply to them and
 // never the one on an internal note, and nobody reads another conversation's (SECURITY-INVARIANT

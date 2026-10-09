@@ -177,7 +177,7 @@ public component ConversationTranscript(Guid conversationId, bool desk = false, 
   // as an entry arrives (so a reply read on an open page is not "unread"). `newestShown` is the newest entry of THIS
   // conversation, and nothing while the transcript still shows the one it is leaving — so moving to another
   // conversation asks once, not once for the move, once for its rows and once for the refetch the mark's own commit
-  // causes (three calls a ticket, measured on Harbour).
+  // causes (three calls a ticket).
   live var newestShown = recent.Count > 0 && recent.First().Conversation.Id == conversationId
     ? recent.First().Id.ToString() : "";
   on change { if (newestShown != "") { MarkConversationRead(conversationId); } }
@@ -737,7 +737,8 @@ public component ConversationProveAddress() {
 }
 
 /// The desk's card for a party: its addresses and numbers and how far each is PROVEN (a proof, a mail received from
-/// it, an agent's say-so — only the first is proof), who it is probably the same as (merge one in with a click), and
+/// it, an agent's say-so — only the first is proof), which parties look like the same person (merge one in with a
+/// click), and
 /// its merges (undo one). A suggestion never merges by itself.
 [Composable]
 public component PartyCard(Guid partyId) {

@@ -1,5 +1,5 @@
 // Osysharp.Conversations — a timeline's events keep their FACTS and are said when they are READ, in the reader's
-// language (D-RTL2 Q2): the same row reads in English to one reader and in Swedish to the next.
+// language: the same row reads in English to one reader and in Swedish to the next.
 
 using Osysharp.Identity;
 using Osysharp.Conversations;

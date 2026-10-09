@@ -5,7 +5,7 @@
 // reply a person sent from its draft — is a different kind of thing on the timeline, and a reader should see that before
 // reading a word. So it has a colour of its own, used for a mark and a hairline, never for a fill a reader has to read
 // through: a violet that is neither the accent nor any status, light and dark contrast-checked as text on the surface
-// and on its own wash (Docs/OsySharp/design/ui-kit/contrast.py).
+// and on its own wash.
 //
 // An app re-themes it by declaring the same token in its own theme — `Colors { ConversationAi = Palette.From("#…"); }` —
 // or ties it to one of its own: `ConversationAi = Colors.Primary;`. Named `Conversation*` because a token name is shared

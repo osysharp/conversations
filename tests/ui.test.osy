@@ -259,7 +259,7 @@ void the_agent_sees_show_original_and_the_customer_sees_translated() {
 }
 
 [Test(Desk)]
-[Skip("KNOWN-GAP: a UI test drives ONE browser at a time — `Ui.NewDevice()` closes the first — so a visitor cannot stay on the chat while the agent opens the desk. The platform half (a signed-out browser in a presence set, its visit id never sent) is AnonymousPresenceHttpTests; logged in osy_test_expressibility_gaps.md")]
+[Skip("A UI test drives one browser at a time — `Ui.NewDevice()` closes the first — so a visitor cannot stay on the chat while the agent opens the desk. A signed-out browser in a presence set, its visit id never sent, is covered by the platform's own tests.")]
 void the_desk_sees_a_signed_out_customer_on_the_page() {
   // A visitor opens the chat and starts a conversation — signed out, no account, only a visit.
   Ui.Visit("/chat");

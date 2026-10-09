@@ -80,7 +80,7 @@ public class ConversationCopy {
   /// The launcher's name for screen readers, and its button's.
   public virtual string LauncherLabel() { return "Chat with us"; }
   public virtual string LauncherClose() { return "Close the chat"; }
-  /// What `happened` says on a timeline — said NOW, in the reader's language, from the facts it holds (D-RTL2 Q2). The
+  /// What `happened` says on a timeline — said NOW, in the reader's language, from the facts it holds. The
   /// kit says its own kinds ("conversations.…"); an app overrides this for the kinds it records, and hands every other
   /// kind back here:
   ///   `public override string EventSentence(ConversationEvent e) {`
@@ -139,7 +139,7 @@ public class ConversationCopy {
 ///
 /// ⚑ STARTED BY THE FIRST REPLY THAT WAITS ON THE SEAT, NOT WITH THE SEAT (`FollowUpLater`). A run per seat from the moment
 ///   it was made cost every conversation a run for each staff member, AI agent and customer in it (8 statements each, two
-///   or three a new ticket — SP-73), and only a customer or a copied person answered in the chat ever needs one. Started,
+///   or three a new ticket), and only a customer or a copied person answered in the chat ever needs one. Started,
 ///   it begins `Pending`: exactly where `Replied` took a run that had been waiting in `None`.
 public workflow WebFollowUp {
   Tracks    = Participant.FollowUp;
@@ -149,7 +149,7 @@ public workflow WebFollowUp {
   /// A reply was written in the chat that this seat may not have seen. Raised by the kit's `Post` — code, never a
   /// browser — and harmless however often: the clock decides what to mail from what is UNREAD when it fires, so a
   /// spurious raise mails nothing new. (Not gated on `IsConversationStaff`: a package's supplied policy is bound in the
-  /// app's pass and cannot be read in a package workflow's `[Authorize]` — friction F-CONV3.)
+  /// app's pass and cannot be read in a package workflow's `[Authorize]`.)
   event Replied();
 
   state None {

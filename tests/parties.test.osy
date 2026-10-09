@@ -60,7 +60,7 @@ void an_agent_cannot_mark_an_address_verified() {
   runas (Ada) { Assert.Equal(0, ContactPoint.Count(p => p.VerifiedKey != null)); }
 }
 
-// ── slice 6: resolution, proof, merge, linking ────────────────────────────────────────────────────────────────────
+// ── resolution, proof, merge, linking ─────────────────────────────────────────────────────────────────────────────
 
 principal Eve => Person.Single(p => p.Email == "eve@example.test");
 
@@ -196,7 +196,7 @@ void merging_moves_points_and_conversations_and_can_be_undone() {
     var byText = Message.Single(m => m.Text == "By text.").ByParty!;
     (byText as ConversationsKitTests.Party)!.Tier = "gold";
     UnitOfWork.Commit();
-    // The desk sees they are probably one person only when they share something — here they do not, so it decides.
+    // The desk is shown them as one person only when they share something — here they do not, so it decides.
     var merge = MergeParties(byMail, byText, "Same person — confirmed on the phone.");
     Assert.Equal(MergeState.Merged, merge.State);
     mergeId = merge.Id;

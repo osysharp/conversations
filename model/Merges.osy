@@ -188,7 +188,7 @@ public void UnmergeParties(Guid mergeId) {
   UnitOfWork.Commit();
 }
 
-/// Parties that are probably this one — another party with one of its addresses, numbers or handles — for the desk to
+/// Parties that look like this one — another party with one of its addresses, numbers or handles — for the desk to
 /// merge or leave. A suggestion only: nothing merges by itself without a proof.
 [SuppressWarning("cost-unbounded-read")]   // one party's contact points and the parties sharing them
 public List<Party> ProbablyTheSame(Party party) {
@@ -213,7 +213,7 @@ public class PartyCardPoint {
   public bool Proven;
 }
 
-/// Another party that is probably this one.
+/// Another party that looks like this one.
 public class PartyCardSuggestion {
   public Guid Party;
   public string Name = "";
@@ -237,7 +237,8 @@ public class PartyCardFacts {
   public List<PartyCardMerge> Merges = [];
 }
 
-/// The desk's view of a party — its points and how far each is proven, who it is probably the same as, and its merges.
+/// The desk's view of a party — its points and how far each is proven, which parties look like the same person, and its
+/// merges.
 [SuppressWarning("cost-unbounded-read")]   // one party's contact points, look-alikes and merges
 public PartyCardFacts PartyCardOf(Guid partyId) {
   var party = Party.Single(p => p.Id == partyId);

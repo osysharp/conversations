@@ -34,9 +34,9 @@
 // ⚑ NO TICKETS, NO STATUSES, NO QUEUES, NO SLA CLOCKS. Those are the helpdesk's and the Inbox kit's; they read
 //   `Conversation.LastCustomerEntryAt` and the timeline, and write their facts with `Record`. Nothing flows the other way.
 package Osysharp.Conversations {
-  version     "0.25.0";
+  version "0.25.1";
   minPlatform "0.9.0";
-  // A product capability: other kits meet it through a bridge that `completes` it, never by using it (D-COMPOSE1 §3.7).
+  // A product capability: other kits meet it through a bridge that `completes` it, never by using it.
   role        vertical;
   summary     "one conversation across channels — a single ordered timeline of messages, notes and events per conversation, visibility per entry enforced by rules (internal never reaches a customer), channels as adapters (email, SMS), a chat widget for a page or as a launcher in its corner with the app's own help above the first message, unread chat replies mailed (or sent on whichever channel reaches the kind of contact point the app names) with a single-use continue link, parties proven by a mailed code and merged or unmerged, people copied in and taken off by the desk, a message split off into a conversation of its own (it moves, with its files and its mail thread), side conversations started beside one — mail to somebody outside or a thread inside the team, drawn as a card on its timeline that opens into its own thread, the other side never seeing the conversation it is beside, each customer answered in their own language with every message scrubbed of card numbers at rest, a redacted canonical copy in the shared memory corpus, files on messages — a pasted screenshot shown in place, a source file previewed with its lines coloured, a ZIP listed, every file a download readable exactly where its message is — and an erasure run that reaches every copy, recorded and run only as a privacy request's plan or a conversation's period says (Osysharp.Privacy.Conversations).";
   model "model/**/*.osy";

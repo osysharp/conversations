@@ -6,13 +6,13 @@ using Osysharp.Workflow;
 
 // ── the channel contract ─────────────────────────────────────────────────────────────────────────────────────────────
 //
-// A CHANNEL is a way to reach a party — email, text messages, later WhatsApp. An adapter package implements
+// A CHANNEL is a way to reach a party — email, text messages, any other carrier. An adapter package implements
 // `IConversationChannel` (sending) and calls `ReceiveInbound` (receiving) and `DeliveryReport` (what the carrier said);
 // the app names its channels in `app.Conversations = new ConversationsSetup { Channels = [ … ] }`. The web channel — the
 // widget and the portal — is built in: there, the entry existing IS the delivery.
 //
 // ⚑ VERSION 0 IS DELIBERATELY SMALL: four members. Everything a later version adds comes with a default body, so an
-//   adapter written against 0.x keeps compiling (D-CONTRACTS1).
+//   adapter written against 0.x keeps compiling.
 
 /// What one outbound message carries to a channel.
 public class OutboundMessage {

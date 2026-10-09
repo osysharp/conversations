@@ -139,7 +139,7 @@ void with_no_translator_nothing_is_translated_and_the_original_is_the_canonical_
   }
 }
 
-/// A translator that cannot run is not handed work (SP-73): the message has none — no run that only ends itself — and is
+/// A translator that cannot run is not handed work: the message has none — no run that only ends itself — and is
 /// still counted as untranslated, and translated once the translator is back and the desk asks.
 [Test(Desk)]
 void a_message_that_came_while_the_translator_was_down_is_translated_once_it_is_back() {

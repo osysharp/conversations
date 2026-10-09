@@ -273,8 +273,8 @@ void a_member_cannot_write_in_a_colleagues_name() {
 }
 
 /// A customer reads their own party and its points, never another customer's — and adds a point only to their own. The
-/// desk writes both parties' points first: a staff write no longer asks the customer grants beside the staff one (the
-/// commit's fold asks a row-filtered allow only when it could still decide — SP-73), so this is the test that the
+/// desk writes both parties' points first: a staff write does not ask the customer grants beside the staff one (the
+/// commit's fold asks a row-filtered allow only when it could still decide), so this is the test that the
 /// customer grants still hold for the customers they are for.
 [Test(Desk)]
 void a_customer_reads_their_own_party_and_points_and_never_another_customers() {

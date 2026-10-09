@@ -20,13 +20,13 @@ using Osysharp.Workflow;
 //   renderings, files, subject and the channel's copy of it (`EraseCopyOf`) — the other side's words stay
 //
 // ⚑ WHAT IS ERASED, AND WHEN, IS NOT DECIDED HERE. A person's request goes through `Osysharp.Privacy`, whose plan says,
-//   category by category, what may be erased and what must be kept (a complaint is kept for legal claims — D-PRIVACY1);
+//   category by category, what may be erased and what must be kept (a complaint is kept for legal claims);
 //   `Osysharp.Privacy.Conversations` is this kit's holder, and it RECORDS a `PartyErasure` for each part the plan erases
 //   — and one per conversation whose period ended. This kit's run does the writes: history is fixed for every caller,
 //   and erasure is the one thing that may rewrite it. Nobody records an erasure directly — not staff, not the app —
-//   because an erasure that bypasses the plan is how a kept complaint used to be erased.
+//   because an erasure that bypassed the plan could erase a complaint the plan keeps.
 //
-// ⚑ A FILE IS ERASED BECAUSE IT IS ABOUT THE PERSON, NEVER BECAUSE THEY SENT IT (owner, Privacy Q7). A document a
+// ⚑ A FILE IS ERASED BECAUSE IT IS ABOUT THE PERSON, NEVER BECAUSE THEY SENT IT. A document a
 //   customer attached may be their company's, or somebody else's; a file goes with a person's erasure only when it is
 //   marked about them (`MarkFileAbout`). A conversation that reaches the end of its period takes all of its files: that
 //   is the conversation's period, not an inference about whose a file is.
@@ -94,8 +94,8 @@ public entity PartyErasure {
     deny read when !IsConversationStaff;
     // SECURITY-INVARIANT(conversations-an-erasure-follows-the-plan): nobody — staff, an admin, the app's own code —
     // records an erasure. Only a workflow run does: `Osysharp.Privacy`'s request run (after its plan decided what is
-    // kept for legal claims) and its daily purge. An erasure recorded directly bypassed the plan, which is how a
-    // complaint the company must keep used to be erased. Guarded by kits/privacy-conversations/tests
+    // kept for legal claims) and its daily purge. An erasure recorded directly would bypass the plan and could erase a
+    // complaint the company must keep. Guarded by Osysharp.Privacy.Conversations' tests:
     // `nobody_erases_a_customer_except_through_a_privacy_request`.
     deny create;
     deny update;
@@ -238,8 +238,8 @@ internal void EraseIdentity(PartyErasure e) {
   var party = e.Party!;
   var setup = App.Setting<ConversationsSetup>();
   // Every party merged INTO this one is the same person — a browser that proved this address, a second record the desk
-  // merged — and kept its own points as a tombstone: they go too. (Measured: a self-service erasure left the visitor
-  // party's own point, holding the address, behind its merge.)
+  // merged — and kept its own points as a tombstone: they go too, or a self-service erasure would leave the visitor
+  // party's own point, holding the address, behind its merge.
   List<Party> people = [party];
   for (var i = 0; i < people.Count; i++) {
     foreach (var a in Party.Where(p => p.MergedInto == people[i]).ToList()) {

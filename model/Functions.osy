@@ -387,7 +387,7 @@ public void MarkConversationRead(Guid conversationId) {
   var conversation = Conversation.FirstOrDefault(c => c.Id == conversationId);
   if (conversation == null) { return; }
   // Nothing to commit when the mark does not move — the reader has no seat, or had already seen the newest. A page calls
-  // this as it opens and as entries arrive, and a commit that writes nothing still cost ~35 statements (SP-73).
+  // this as it opens and as entries arrive, and a commit that writes nothing still costs ~35 statements.
   if (!MarkRead(conversation)) { return; }
   UnitOfWork.Commit();
 }
