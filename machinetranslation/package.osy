@@ -12,7 +12,7 @@
 //   take any translator. With no key, the translator is not ready: messages keep their originals and the desk is told
 //   why, in words it can act on.
 package Osysharp.Conversations.MachineTranslation {
-  version     "0.2.0";
+  version     "0.2.1";
   minPlatform "0.9.0";
   summary     "the app's own model as the translator of its conversations — a copy of every customer message in the desk's language and every reply in each customer's, through the app's key, router and budget; a missing key a state the desk is told about, never a lost message.";
   completes   Osysharp.Conversations@0, Osysharp.MachineTranslation@0;
