@@ -167,7 +167,7 @@ public entity Message : ConversationEntry {
 public entity ConversationEvent : ConversationEntry {
   /// "<source>.<what>" — "inbox.assigned", "sla.first-reply-breached", "agents.draft-approved".
   [Required, MaxLength(120)] string Kind;
-  /// The kit or app that wrote it — "Osysharp.Inbox".
+  /// The kit or app that wrote it — "Osysharp.WorkQueues".
   [Required, MaxLength(60)] string Source;
   /// Who it is about, as named at the time — the customer merged, the colleague it was handed to — and, when it is a
   /// party, which: erasing who they are reaches the name here too.

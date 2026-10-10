@@ -22,7 +22,7 @@ public enum FollowUpState {
 public enum TextFormat {
   /// As written — what customers and channels send. A fenced snippet is still shown as code, quoted mail folds.
   Plain,
-  /// Markdown — bold, lists, links, code — as the desk's composer writes it (Osysharp.Composer).
+  /// Markdown — bold, lists, links, code — as the desk's composer writes it (Osysharp.ReplyComposer).
   Markdown,
 }
 
@@ -71,7 +71,7 @@ public entity Conversation {
   [Classification(Personal.Content), MaxLength(300)] string? Subject;
   [Required] DateTime StartedAt;
   DateTime? LastEntryAt;
-  /// The last time the CUSTOMER wrote — what "waiting on us" and an SLA clock read (the Inbox kit's, not this one's).
+  /// The last time the CUSTOMER wrote — what "waiting on us" and an SLA clock read (the WorkQueues kit's, not this one's).
   DateTime? LastCustomerEntryAt;
   /// Where a reply goes by default: the channel of the LAST inbound message ("web", "email") and our endpoint on it.
   [MaxLength(40)] string ReplyChannel = "web";

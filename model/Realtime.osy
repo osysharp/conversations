@@ -45,6 +45,6 @@ topic ConversationTyping(Guid conversationId) {
 }
 
 // The DESK's own seats — who has a conversation open, and who is replying or writing a note (collision) — are the
-// Collaboration kit's record presence, addressed by the conversation's id (`RecordPresence.For(conversationId)`,
+// Presence kit's record presence, addressed by the conversation's id (`RecordPresence.For(conversationId)`,
 // `SeatActivity`, `RecordSeats`): one seat set per record, whichever kit draws it, so an app showing a conversation
 // beside the item it belongs to does not show two. Who may sit there is the app's `CollaboratesOnRecords`.

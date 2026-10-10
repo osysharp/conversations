@@ -6,7 +6,7 @@ an AI's drafts and the things that happened ("assigned to Ada", "marked solved")
 not a toggle in a composer: a note never reaches a customer, whatever your app grants and whichever way a row is read.
 
 It is the core a helpdesk, a CRM's service module or a contact centre writes into. It has no tickets, statuses, queues or
-SLA clocks — those are yours (or the Inbox kit's), reading the timeline and writing their facts with `Record`.
+SLA clocks — those are yours (or the WorkQueues kit's), reading the timeline and writing their facts with `Record`.
 
 ```osy
 // app.osy

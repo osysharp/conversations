@@ -16,5 +16,5 @@ app.Conversations = new ConversationsSetup {
 };
 
 // The sign-in flow's principal — what links a party to an account when someone signs in (`LinkSignedInAccount`).
-// A real app gets it from `Osysharp.Accounts`; this desk names only the role, which is all its tests run as.
+// A real app gets it from `Osysharp.UserAccounts`; this desk names only the role, which is all its tests run as.
 app.AuthBootstrap = new AuthBootstrap { Role = AppRole.Authenticator, Login = SignIn };

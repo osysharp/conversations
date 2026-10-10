@@ -9,7 +9,7 @@ using Osysharp.Conversations;
 
 /// The kit asks the app who its staff are — here, its agents and its integration account (what a mail receiver runs as).
 policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && (g.Role == AppRole.Agent || g.Role == AppRole.Integration));
-// Who sits on a conversation (and any record) with the desk — the Collaboration kit's question.
+// Who sits on a conversation (and any record) with the desk — the Presence kit's question.
 policy CollaboratesOnRecords => IsConversationStaff;
 
 /// Everybody who signs in: agents, and customers who use the portal.

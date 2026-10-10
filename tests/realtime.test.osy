@@ -5,7 +5,7 @@
 
 using Osysharp.Identity;
 using Osysharp.Conversations;
-using Osysharp.Collaboration;
+using Osysharp.Presence;
 using ConversationsKitTests;
 
 [Test(Desk)]

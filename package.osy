@@ -31,10 +31,10 @@
 //   Erasure.osy       the copy register: erasure across every copy (run by `Osysharp.Privacy.Conversations` as a
 //                     request's plan and the daily purge decide), files erased only when marked about a person, export
 //
-// ⚑ NO TICKETS, NO STATUSES, NO QUEUES, NO SLA CLOCKS. Those are the helpdesk's and the Inbox kit's; they read
+// ⚑ NO TICKETS, NO STATUSES, NO QUEUES, NO SLA CLOCKS. Those are the helpdesk's and the WorkQueues kit's; they read
 //   `Conversation.LastCustomerEntryAt` and the timeline, and write their facts with `Record`. Nothing flows the other way.
 package Osysharp.Conversations {
-  version "0.25.1";
+  version "0.25.2";
   minPlatform "0.9.0";
   // A product capability: other kits meet it through a bridge that `completes` it, never by using it.
   role        vertical;
@@ -46,9 +46,9 @@ package Osysharp.Conversations {
   personal Content;
   personal Identity;
   use Osysharp.Identity@0;
-  // Who of the desk is on a conversation — the Collaboration kit's record presence, the one seat set every kit on a
+  // Who of the desk is on a conversation — the Presence kit's record presence, the one seat set every kit on a
   // record shares (the Inbox's item seats included). The app says who collaborates (`CollaboratesOnRecords`).
-  use Osysharp.Collaboration@0;
+  use Osysharp.Presence@0;
   use Osysharp.Workflow;
   // Every message's canonical copy is in the app's shared corpus — what similar conversations and search read.
   use Osysharp.Memory;

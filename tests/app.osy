@@ -3,7 +3,7 @@ app ConversationsKitTests {
   tests "**/*.test.osy";
   use Osysharp.Identity@0;
   use Osysharp.Conversations@0;
-  use Osysharp.Collaboration@0;
+  use Osysharp.Presence@0;
   use Osysharp.Workflow;
   use Osysharp.Memory;
   // A deterministic embedder, so the memory tests can search (`TestEmbedder.Use`).

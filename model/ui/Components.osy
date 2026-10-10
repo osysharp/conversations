@@ -12,7 +12,7 @@ namespace Osysharp.Conversations;
 
 using Osysharp.Ui;
 using Osysharp.Storage;
-using Osysharp.Collaboration;
+using Osysharp.Presence;
 
 /// One message on a transcript: who wrote it (as it was at the time), the channel it travelled on, when — and, for the
 /// desk, whether it is a note or an AI draft (tinted; a customer never sees one). What an AI wrote is marked for both
@@ -564,7 +564,7 @@ public component ConversationPresenceChip(Guid conversationId, bool desk = false
 /// The desk's colleagues on this conversation (staff presence). Announces the viewer as "viewing" on mount.
 [Composable]
 public component ConversationDeskSeats(Guid conversationId) {
-  // The Collaboration kit's seats on this record — the one seat set (see Realtime.osy).
+  // The Presence kit's seats on this record — the one seat set (see Realtime.osy).
   render { RecordSeats(conversationId); }
 }
 
