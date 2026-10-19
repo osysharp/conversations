@@ -12,7 +12,7 @@ using Osysharp.Conversations;
 policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && (g.Role == AppRole.Agent || g.Role == AppRole.Integration));
 // Who manages the mailboxes (Osysharp.Mail.Receiving's page) — this app has no admins, so its conversationstaff staff.
 policy ManagesMailboxes => IsConversationStaff;
-// Who sits on a conversation (and any record) with the desk — the Collaboration kit's question.
+// Who sits on a conversation (and any record) with the desk — the Presence kit's question.
 policy CollaboratesOnRecords => IsConversationStaff;
 
 entity Person : Principal {

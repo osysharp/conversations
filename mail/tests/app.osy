@@ -7,7 +7,7 @@ app ConversationsMailTests {
   use Osysharp.Mail@0;
   use Osysharp.Mail.Receiving@0;
   use Osysharp.Conversations@0;
-  use Osysharp.Collaboration@0;
+  use Osysharp.Presence@0;
   // Osysharp.Conversations.Mail, the package under test, is not written: it arrives by itself because this app uses
   // Conversations and Mail.Receiving, which it completes (`osy lock` includes it and says so).
   use Osysharp.Workflow;
