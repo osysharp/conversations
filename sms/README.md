@@ -12,7 +12,7 @@ delivery report moves the delivery it reports on. A reply too long for one text 
 // app.osy
 use Osysharp.Identity@0;
 use Osysharp.Sms@0;
-use Osysharp.Sms.Elks@0;              // or another carrier's sender
+use Osysharp.Sms.FortySixElks@0;              // or another carrier's sender
 use Osysharp.Conversations@0;
 // Osysharp.Conversations.Sms is not written: it arrives by itself, because the app uses what it completes (`osy lock` says so)
 use Osysharp.Workflow;

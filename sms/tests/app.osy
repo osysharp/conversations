@@ -6,7 +6,7 @@ app ConversationsSmsTests {
   use Osysharp.Identity@0;
   use Osysharp.Sms@0;
   use Osysharp.Conversations@0;
-  use Osysharp.Collaboration@0;
+  use Osysharp.Presence@0;
   // Osysharp.Conversations.Sms, the package under test, is not written: it arrives by itself because this app uses
   // Conversations and Sms, which it completes (`osy lock` includes it and says so).
   use Osysharp.Workflow;

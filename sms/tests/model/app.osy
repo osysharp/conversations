@@ -9,7 +9,7 @@ using Osysharp.Conversations;
 
 /// The desk's staff: its agents, and the account the carrier's webhook runs as.
 policy IsConversationStaff => RoleGrant.Any(g => g.Member == user && (g.Role == AppRole.Agent || g.Role == AppRole.Integration));
-// Who sits on a conversation (and any record) with the desk — the Collaboration kit's question.
+// Who sits on a conversation (and any record) with the desk — the Presence kit's question.
 policy CollaboratesOnRecords => IsConversationStaff;
 
 entity Person : Principal {
