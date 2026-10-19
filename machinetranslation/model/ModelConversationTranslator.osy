@@ -4,7 +4,7 @@ using Osysharp.Conversations;
 using Osysharp.MachineTranslation;
 
 /// The conversations' translator, over the app's own model: detection offline first (the model only when a text is too
-/// short to tell), translation through `LlmClient.Complete`, the desk's glossary kept as written.
+/// short to tell), translation through `Llm.Complete`, the desk's glossary kept as written.
 public class ModelConversationTranslator : IConversationTranslator {
   /// The translator underneath — which model, which key, which languages the detector knows.
   public ModelTranslator Translator = new ModelTranslator();

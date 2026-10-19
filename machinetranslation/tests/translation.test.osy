@@ -5,6 +5,7 @@ using Osysharp.Identity;
 using Osysharp.Conversations;
 using Osysharp.Conversations.MachineTranslation;
 using Osysharp.MachineTranslation;
+using Osysharp.Llm;
 using ConversationsMachineTranslationTests;
 
 /// Ada answers the chat; the model answers every translation by tagging it.
@@ -12,13 +13,16 @@ using ConversationsMachineTranslationTests;
 void Shop() {
   var ada = new Person { Email = "ada@shop.test", DisplayName = "Ada" };
   new RoleGrant { Member = ada, Role = AppRole.Agent };
-  LlmClient.Complete.Stub(p => {
-    new Asked { Prompt = p };
-    var start = p.IndexOf("<text>\n") + 7;
-    var end = p.IndexOf("\n</text>");
-    var to = p.Substring(p.IndexOf("into the language tagged ") + 25, 2);
-    return $"[{to}] " + p.Substring(start, end - start);
-  });
+  CompleteWith.Stub((request, call) => new LlmResult { Response = Scripted.Text(Tagged(Scripted.Asked(request))) });
+}
+
+/// What the model in these tests answers for one prompt, noting that it was asked.
+string Tagged(string p) {
+  new Asked { Prompt = p };
+  var start = p.IndexOf("<text>\n") + 7;
+  var end = p.IndexOf("\n</text>");
+  var to = p.Substring(p.IndexOf("into the language tagged ") + 25, 2);
+  return $"[{to}] " + p.Substring(start, end - start);
 }
 
 principal Ada => Person.Single(p => p.Email == "ada@shop.test");
