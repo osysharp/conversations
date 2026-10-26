@@ -130,3 +130,105 @@ component DeskPage(Guid id) {
 The kit is ordinary Osy# in `model/`, and its tests are its specification. Each security promise
 (`security.test.osy`, `parties.test.osy`, `channels.test.osy`, `continuation.test.osy`) is checked to fail when its
 rule is taken out.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void a_signed_in_customer_starts_a_conversation_as_their_accounts_party() {
+  runas (Cus) {
+    StartConversation("Can I change my delivery address?", "Address");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    var seat = Participant.Single(p => p.Conversation.Subject == "Address" && p.Role == ParticipantRole.Customer);
+    Assert.Equal(PartyOf("cus@example.test").Id, seat.Party!.Id);
+  }
+}
+```
+
+From [`tests/accounts.test.osy`](tests/accounts.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using Osysharp.Storage;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void a_customer_reads_the_screenshot_on_a_reply_and_never_the_one_on_a_note() {
+  Guid replyShot = Guid.Empty;
+  Guid noteShot = Guid.Empty;
+  runas (Ada) {
+    var c = WithCus("Screens");
+    var shot = File.Create("annotated.png", "image/png", Png());
+    var internalShot = File.Create("triage.png", "image/png", Png());
+    Post(c, "Here is where to click.", EntryVisibility.Customer, files: [shot]);
+    Post(c, "Her account is flagged — see screenshot.", EntryVisibility.Internal, files: [internalShot]);
+    UnitOfWork.Commit();
+    replyShot = shot.Id;
+    noteShot = internalShot.Id;
+  }
+  runas (Cus) {
+    // The ALLOW first: the reply's picture, as a row and as the file itself.
+    var attached = MessageAttachment.Single(a => a.Message.Conversation.Subject == "Screens");
+    Assert.Equal("annotated.png", attached.FileName);
+    Assert.Equal(AttachmentKind.Image, attached.Kind);
+    Assert.Equal("image/png", attached.ContentType);
+    Assert.True(FileAsset.Any(f => f.Id == replyShot));
+    // The note's picture: neither the row nor the file.
+    Assert.False(FileAsset.Any(f => f.Id == noteShot));
+  }
+  // Another customer reads neither.
+  runas (Dee) {
+    Assert.False(FileAsset.Any(f => f.Id == replyShot));
+    Assert.Equal(0, MessageAttachment.Count(a => a.Message.Conversation.Subject == "Screens"));
+  }
+}
+```
+
+From [`tests/attachments.test.osy`](tests/attachments.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Conversations;
+using ConversationsKitTests;
+
+[Test(Desk)]
+void a_reply_goes_out_on_the_channel_the_customer_last_wrote_on() {
+  runas (Inbox) { Mail("ana@example.test", "<m1@example.test>", "My invoice is wrong."); UnitOfWork.Commit(); }
+  runas (Ada) {
+    var c = Conversation.Single(x => x.Subject == "Help");
+    Assert.Equal("email", c.ReplyChannel);
+    Post(c, "We have corrected it — a new invoice is attached.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    var sent = Carried.Single(x => x.Text.StartsWith("We have corrected it"));
+    Assert.Equal("email", sent.Channel);
+    Assert.Equal("ana@example.test", sent.To);
+    Assert.Equal("support@desk.test", sent.From);
+    Assert.Equal(DeliveryState.Sent, MessageDelivery.Single().State);
+  }
+}
+```
+
+From [`tests/channels.test.osy`](tests/channels.test.osy).
+
+## Learn more
+
+- [The Osysharp.Conversations reference](https://osysharp.com/reference/ui/conversations-kit/)
+- [Osysharp.Conversations in the package catalogue](https://osysharp.com/packages/#osysharp-conversations)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
