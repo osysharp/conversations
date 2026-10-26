@@ -74,3 +74,126 @@ What it reads:
 - **who else** — every other `To` and `Cc` address, which is how a copied colleague's later reply is let in;
 - **automatic or not** — `Auto-Submitted` other than `no`, `Precedence: bulk/junk/list/auto_reply`, the `X-Autoreply`
   family, or a bounce (`mailer-daemon@`, `postmaster@`, `X-Failed-Recipients`).
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Conversations;
+using Osysharp.Conversations.Mail;
+using ConversationsMailTests;
+
+[Test(Desk)]
+void a_mail_received_becomes_a_message_from_whoever_wrote_it() {
+  runas (Inbox) {
+    var mail = Received("Ana Lima <Ana@Example.test>", "<m1@example.test>", "", "billing@desk.test");
+    mail.Text = null;
+    mail.Html = "<p>My invoice is <b>wrong</b> &amp; late.</p>";
+    mail.Cc = ["Boss <boss@example.test>", "support@desk.test"];
+    var r = ReceiveMail(mail);
+    UnitOfWork.Commit();
+    Assert.True(r.Started);
+  }
+  runas (Ada) {
+    var c = Conversation.Single();
+    Assert.Equal("Invoice", c.Subject);
+    Assert.Equal("email", c.ReplyChannel);
+    // The address it came TO is the one we answer from.
+    Assert.Equal("billing@desk.test", c.ReplyEndpoint);
+    var m = Message.Single();
+    Assert.Equal("My invoice is wrong & late.", m.Text);
+    Assert.Equal("Ana Lima", m.ByName);
+    // Everyone else it was written to — not the sender, not our own addresses.
+    Assert.Equal("boss@example.test", m.AlsoTo);
+    Assert.Equal(1, ContactPoint.Count(p => p.Value == "ana@example.test"));
+  }
+}
+```
+
+From [`tests/mail.test.osy`](tests/mail.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Conversations;
+using Osysharp.Conversations.Mail;
+using Osysharp.Storage;
+using ConversationsMailTests;
+
+[Test(Mailbox)]
+void a_mail_from_the_watched_mailbox_lands_with_only_what_was_new_and_keeps_the_rest() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive(1, GmailReplyWithFiles());
+    UnitOfWork.Commit();
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    Poll();
+  }
+  runas (Ada) {
+    var m = Message.Single(x => x.ExternalId == "<bo-2@example.test>");
+    // What Bo wrote THIS time is the message…
+    Assert.Equal("Still broken - screenshot and the file attached.", m.Text);
+    // …what Gmail quoted under it is kept beside it, not thrown away…
+    Assert.Contains("Can you send a screenshot?", m.QuotedText ?? "");
+    // …and so is the whole original, and both files, each read for what it really is.
+    Assert.True(m.Original != null);
+    var files = MessageAttachment.Where(a => a.Message == m).OrderBy(a => a.FileName).ToList();
+    Assert.Equal(2, files.Count);
+    Assert.Equal("Export.cs", files[0].FileName);
+    Assert.Equal(AttachmentKind.Code, files[0].Kind);
+    Assert.Equal("csharp", files[0].Language);
+    Assert.Equal(AttachmentKind.Image, files[1].Kind);
+    // The receiver kept its own record, handed over once.
+    Assert.Equal(ReceivedMailStatus.Handled, ReceivedMail.Single().Status);
+  }
+}
+```
+
+From [`tests/receiving.test.osy`](tests/receiving.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Conversations;
+using Osysharp.Conversations.Mail;
+using ConversationsMailTests;
+
+[Test(Desk)]
+void a_reply_goes_from_the_address_it_came_to_and_threads_in_the_customers_mail() {
+  runas (Inbox) { ReceiveMail(Received("ana@example.test", "<m1@example.test>", "Wrong total.", "billing@desk.test")); UnitOfWork.Commit(); }
+  runas (Ada) {
+    Post(Conversation.Single(), "Corrected — a new invoice is on its way.");
+    UnitOfWork.Commit();
+    DeliverAll();
+  }
+  runas (Ada) {
+    var sent = Carried.Single();
+    Assert.Equal("billing@desk.test", sent.From);
+    Assert.Equal("ana@example.test", sent.To);
+    Assert.Equal("Re: Invoice", sent.Subject);
+    Assert.Equal("Corrected — a new invoice is on its way.", sent.Text);
+    Assert.Equal("<m1@example.test>", sent.InReplyTo);
+    Assert.Contains("<m1@example.test>", sent.References);
+    var delivery = MessageDelivery.Single();
+    Assert.Equal(DeliveryState.Sent, delivery.State);
+    // The delivery's id IS the Message-ID the carrier sent — what the customer's answer will quote.
+    Assert.Equal(sent.MessageId, delivery.ExternalId);
+  }
+}
+```
+
+From [`tests/mail.test.osy`](tests/mail.test.osy).
+
+## Learn more
+
+- [Osysharp.Conversations.Mail in the package catalogue](https://osysharp.com/packages/#osysharp-conversations-mail)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
