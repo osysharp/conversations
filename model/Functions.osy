@@ -37,16 +37,16 @@ public class ConversationsSetup {
   public IConversationTranslator? Translator = null;
   /// The desk's language — every message gets a redacted copy in it (`Message.CanonicalText`), which search and memory
   /// read. BCP-47. An organisation may seed its own working language for every desk it runs.
-  [OrgPolicy(OrgPolicyMode.Default)] public string CanonicalLanguage = "en";
+  [OrgPolicy(OrgPolicyMode.Default, Name = "Conversation language")] public string CanonicalLanguage = "en";
   /// Terms a translation keeps as written — product and brand names.
   public List<GlossaryTerm> Glossary = [];
   /// What is scrubbed from every message as it is stored, and redacted before a model sees it.
   public ConversationRedactor Redactor = new ConversationRedactor();
   /// The largest file a message may carry (0.8.0) — said as a sentence when it is over. An organisation's policy may
   /// bound it (both limits) for every app it runs.
-  [OrgPolicy(OrgPolicyMode.Range)] public long MaxFileBytes = 10 * 1024 * 1024;
+  [OrgPolicy(OrgPolicyMode.Range, Name = "Conversation file size (bytes)")] public long MaxFileBytes = 10 * 1024 * 1024;
   /// The most all of one message's files may come to.
-  [OrgPolicy(OrgPolicyMode.Range)] public long MaxMessageBytes = 25 * 1024 * 1024;
+  [OrgPolicy(OrgPolicyMode.Range, Name = "Conversation message size (bytes)")] public long MaxMessageBytes = 25 * 1024 * 1024;
 }
 
 /// What happens in the chat, for the app to act on — the kit tells nobody by itself. Each runs in the customer's own

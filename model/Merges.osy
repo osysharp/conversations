@@ -237,11 +237,14 @@ public class PartyCardFacts {
   public List<PartyCardMerge> Merges = [];
 }
 
+/// The desk's view of a party, by its id — what the card's page calls. A caller that already holds the party's row hands
+/// it to `PartyCardFor` instead, and the party is not read again.
+public PartyCardFacts PartyCardOf(Guid partyId) { return PartyCardFor(Party.Single(p => p.Id == partyId)); }
+
 /// The desk's view of a party — its points and how far each is proven, which parties look like the same person, and its
 /// merges.
 [SuppressWarning("cost-unbounded-read")]   // one party's contact points, look-alikes and merges
-public PartyCardFacts PartyCardOf(Guid partyId) {
-  var party = Party.Single(p => p.Id == partyId);
+public PartyCardFacts PartyCardFor(Party party) {
   var facts = new PartyCardFacts { Name = NameOf(party), HasAccount = party.Account != null,
                                    MergedInto = party.MergedInto == null ? "" : NameOf(party.MergedInto!) };
   foreach (var p in ContactPoint.Where(p => p.Party == party && p.Kind != ContactPointKind.Visitor).OrderBy(p => p.CreatedAt).ToList()) {
