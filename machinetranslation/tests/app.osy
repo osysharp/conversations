@@ -8,7 +8,7 @@ app ConversationsMachineTranslationTests {
   use Osysharp.Conversations@0;
   use Osysharp.Presence@0;
   use Osysharp.MachineTranslation@0;
-  use Osysharp.Llm@2;
+  use Osysharp.Llm@3;
   // Osysharp.Conversations.MachineTranslation, the package under test, is not written: it arrives by itself because this app uses
   // Conversations and MachineTranslation, which it completes (`osy lock` includes it and says so).
   use Osysharp.Workflow;
