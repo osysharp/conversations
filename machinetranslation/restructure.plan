@@ -1,0 +1,31 @@
+# restructure.plan — Osysharp.Conversations.MachineTranslation
+# Written by `osy restructure --plan`. It changes no source: review it in a diff, then choose
+#   a home: add `pin <Name> -> <Type>` under "pins";
+#   a name: edit the third column of its line in the rename list;
+#   a class or an actor stays a type where it is: add `keep <Name>` under "pins".
+# Run `osy restructure --plan` again: it keeps your lines and checks each one.
+# `osy restructure --apply` moves exactly the rows below, and refuses a plan the code no longer gives.
+#
+# folder: the whole package
+# 1 declarations: 0 given a home (0 as instance members, 0 beside their type), 0 tied, 0 with no home, 1 stay.
+# names: 0 renamed, 0 need a name, 0 keep theirs.
+
+## docs — 1 page read, 2 osy samples: rewritten by --apply through the same map; a part of a sample that does not parse is left as it is
+README.md
+
+## homes — name, kind, home, as; why; how many references name it
+
+## stays
+ModelConversationTranslator  class     # a class with behaviour stays its own type
+
+## ties — nothing is guessed: each stays where it is until you pin it
+
+## no home — nothing ties it to one of the folder's types; it stays
+
+## could be instance — its first parameter is its home, but it is published by name, a saga undo calls it, it has overloads or a caller passes null, so it stays static
+
+## could be private — every reference is inside its home; the tool never narrows, a reviewer may
+
+## pins
+
+## rename list — old name, the tool's proposal, the name it gets. Edit the third column to choose another.
